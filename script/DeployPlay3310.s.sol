@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.27;
 
 import "forge-std/Script.sol";
 import "../src/Play3310V1.sol";
@@ -49,7 +49,6 @@ contract DeployPlay3310 is Script {
         // ==================== ENVIRONMENT VARIABLES ====================
         address backendSigner = vm.envAddress("BACKEND_SIGNER_ADDRESS");
         address cUSD = vm.envAddress("CUSD_ADDRESS");
-        address owner = vm.envOr("OWNER_ADDRESS", msg.sender);
 
         // Validate required addresses
         require(backendSigner != address(0), "BACKEND_SIGNER_ADDRESS not set");
@@ -62,7 +61,7 @@ contract DeployPlay3310 is Script {
         console.log("\n=== Starting Play3310 Deployment ===");
         console.log("Backend Signer: %s", backendSigner);
         console.log("cUSD Address: %s", cUSD);
-        console.log("Owner Address: %s", owner);
+        console.log("Owner Address: %s", msg.sender);
         console.log("Genesis Timestamp (Monday 00:00 UTC): %d", genesisTimestamp);
 
         // Start broadcasting transactions
@@ -77,7 +76,7 @@ contract DeployPlay3310 is Script {
             address(implementation),
             cUSD,
             backendSigner,
-            owner,
+            msg.sender,
             genesisTimestamp
         );
         console.log("Proxy deployed at: %s", address(proxy));
@@ -108,13 +107,13 @@ contract DeployPlay3310 is Script {
         console.log("\n=== Deployment Complete ===");
         console.log("Proxy Address: %s", address(proxy));
         console.log("Implementation Address: %s", address(implementation));
-        console.log("Owner: %s", owner);
+        console.log("Owner: %s", msg.sender);
         console.log("Genesis Timestamp: %d", genesisTimestamp);
 
         // ==================== NEXT STEPS ====================
         console.log("\n=== Next Steps ===");
         console.log("1. Fund the contract with cUSD:");
-        console.log("   cUSD.transfer(proxyAddress, amount)");
+        console.log(" cUSD.safeTransfer(proxyAddress, amount)");
         console.log("2. Verify on block explorer");
         console.log("3. Update frontend with proxy address");
     }

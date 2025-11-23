@@ -3,15 +3,12 @@ src = "src"
 out = "out"
 libs = ["lib"]
 
-remappings = [
-    "openzeppelin-contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/",
-    "openzeppelin-contracts/=lib/openzeppelin-contracts/",
-    "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
-    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
-    "erc4626-tests/=lib/openzeppelin-contracts-upgradeable/lib/erc4626-tests/",
-    "forge-std/=lib/forge-std/src/",
-    "halmos-cheatcodes/=lib/openzeppelin-contracts-upgradeable/lib/halmos-cheatcodes/src/"
-]
+[rpc_endpoints]
+celo-sepolia = "https://forno.celo-sepolia.celo-testnet.org/"
+celo = "https://forno.celo.org"
+
+[etherscan]
+celo-sepolia = { key = "TXP97HKQ1NGA83N72D7BQTK8SHPDMAS6WZ", url = "https://api.celoscan.io/v2/api" }
 
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

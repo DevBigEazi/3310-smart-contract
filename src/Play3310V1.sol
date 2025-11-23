@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.27;
 
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -45,6 +45,9 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     error InsufficientContractBalance();
     error NoWinnersThisWeek();
     error InsufficientFunds();
+    error ScoreCannotDecrease();
+    error ScoreTooHigh();
+    error GameCountCannotDecrease();
 
     // ==================== VERSION ====================
     uint256 public constant VERSION = 1;
@@ -86,6 +89,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
 
     uint256 public weeklyBasePool;                  // $5 per week in wei
     uint256 public minQualificationScore;           // Default: 500
+    uint256 public maxScore;                        // Maximum allowed score (anti-cheat)
     uint256 public genesisTimestamp;                // First Monday 00:00 UTC
 
     uint256[] public prizeDistribution;             // Basis points for each rank
@@ -111,11 +115,15 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     // Total unclaimed amount per player (for quick lookups)
     mapping(address => uint256) public totalUnclaimedAmount;
 
+    // P2: Store referral points on-chain
+    mapping(address => uint256) public playerReferralPoints;
+
     // ==================== EVENTS ====================
     event ScoreSubmitted(
         address indexed player,
         uint256 indexed weekId,
-        uint256 score,
+        uint256 weeklyScore,
+        uint256 gameScore,
         uint256 gameCount,
         uint256 rank
     );
@@ -153,9 +161,20 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
 
     event ContractUpgraded(address indexed newImplementation);
 
+    event ReferralPointsUpdated(
+        address indexed player,
+        uint256 newPoints,
+        uint256 delta
+    );
+
     // ==================== MODIFIERS ====================
     modifier validWeek(uint256 _weekId) {
         if (_weekId == 0 || _weekId > getCurrentWeek()) revert InvalidWeek();
+        _;
+    }
+
+    modifier onlyBackendSigner() {
+        require(msg.sender == backendSigner, "Only backend signer");
         _;
     }
 
@@ -184,6 +203,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         backendSigner = _backendSigner;
         weeklyBasePool = 5 ether;  // $5 in wei (assuming 18 decimals)
         minQualificationScore = 500;
+        maxScore = 100000; // Maximum score limit
         genesisTimestamp = _genesisTimestamp;
 
         // Initialize prize distribution (basis points, total = 10000)
@@ -202,6 +222,15 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     }
 
     /**
+     * @dev Update maximum score limit
+     * @param _newMaxScore New maximum score
+     */
+    function setMaxScore(uint256 _newMaxScore) external onlyOwner {
+        if (_newMaxScore == 0) revert ScoreMustBePositive();
+        maxScore = _newMaxScore;
+    }
+
+    /**
      * @dev Update backend signer address
      * @param _newSigner New signer address
      */
@@ -217,6 +246,20 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     function setWeeklyBasePool(uint256 _newAmount) external onlyOwner {
         if (_newAmount == 0) revert AmountMustBePositive();
         weeklyBasePool = _newAmount;
+    }
+
+    /**
+     * @dev P2: Update referral points for a player (called by backend)
+     * @param _player Player address
+     * @param _points New total referral points
+     */
+    function updateReferralPoints(address _player, uint256 _points) external onlyBackendSigner {
+        uint256 oldPoints = playerReferralPoints[_player];
+        playerReferralPoints[_player] = _points;
+        
+        uint256 delta = _points > oldPoints ? _points - oldPoints : 0;
+        
+        emit ReferralPointsUpdated(_player, _points, delta);
     }
 
     /**
@@ -260,6 +303,20 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     }
 
     /**
+     * @dev P3: Get player's weekly stats
+     * @param _weekId Week identifier
+     * @param _player Player address
+     */
+    function getPlayerWeeklyStats(uint256 _weekId, address _player)
+        external
+        view
+        validWeek(_weekId)
+        returns (PlayerWeeklyScore memory)
+    {
+        return weeklyPlayerScores[_weekId][_player];
+    }
+
+    /**
      * @dev Get player's all-time stats
      * @param _player Player address
      */
@@ -269,6 +326,14 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         returns (AllTimeStats memory)
     {
         return playerAllTimeStats[_player];
+    }
+
+    /**
+     * @dev P2: Get player's on-chain referral points
+     * @param _player Player address
+     */
+    function getReferralPoints(address _player) external view returns (uint256) {
+        return playerReferralPoints[_player];
     }
 
     /**
@@ -330,6 +395,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     // ==================== LEADERBOARD FUNCTIONS ====================
     /**
      * @dev Internal function to compare two scores using tiebreaker rules
+     * @notice Score already includes referral points
      * @return true if scoreA is better than scoreB
      */
     function _isBetterScore(
@@ -340,20 +406,22 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         uint256 gameCountB,
         uint256 referralPointsB
     ) internal pure returns (bool) {
-        // Primary: Highest score
+        // Primary: Highest score (already includes referral points)
         if (scoreA > scoreB) return true;
         if (scoreA < scoreB) return false;
 
-        // Tiebreaker 1: Fewest games played
+        // Tied on score - now check tiebreakers
+        
+        // Tiebreaker 1: Fewest games played (more efficient)
         if (gameCountA < gameCountB) return true;
         if (gameCountA > gameCountB) return false;
 
-        // Tiebreaker 2: Most referral points
+        // Tiebreaker 2: Most referral points (as additional tiebreaker)
         if (referralPointsA > referralPointsB) return true;
 
         return false;
     }
-
+    
     /**
      * @dev Submit score and update Top 10 leaderboard
      * @param _weekId Current week ID
@@ -376,14 +444,28 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         if (_score < minQualificationScore) revert ScoreBelowQualification();
         if (_gameCount == 0) revert GameCountMustBePositive();
 
+        // Add upper bound validation
+        if (_score > maxScore) revert ScoreTooHigh();
+        if (_gameScore > maxScore) revert ScoreTooHigh();
+
         // Verify signature
         bytes32 messageHash = keccak256(
             abi.encodePacked(msg.sender, _weekId, _score, _gameScore, _gameCount, _referralPoints)
         );
-        bytes32 ethSignedMessageHash = messageHash.toEthSignedMessageHash();
-
-        address signer = ethSignedMessageHash.recover(_signature);
+        
+        // Backend already uses signMessageSync which adds Ethereum prefix
+        // So we recover directly without adding prefix again
+        address signer = messageHash.toEthSignedMessageHash().recover(_signature);
         if (signer != backendSigner) revert InvalidSignature();
+
+        // Get previous score if exists
+        PlayerWeeklyScore memory prevScore = weeklyPlayerScores[_weekId][msg.sender];
+
+        // Validate score can only increase (cumulative scoring)
+        if (prevScore.score > 0) {
+            if (_score < prevScore.score) revert ScoreCannotDecrease();
+            if (_gameCount < prevScore.gameCount) revert GameCountCannotDecrease();
+        }
 
         // Create player score entry
         PlayerWeeklyScore memory newScore = PlayerWeeklyScore({
@@ -395,9 +477,6 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
             rank: 0
         });
 
-        // Get previous score if exists
-        PlayerWeeklyScore memory prevScore = weeklyPlayerScores[_weekId][msg.sender];
-
         // Update all-time stats with delta
         _updateAllTimeStatsWithDelta(newScore, prevScore);
 
@@ -407,7 +486,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         // Update Top 10 leaderboard
         _updateTop10Leaderboard(_weekId, newScore);
 
-        emit ScoreSubmitted(msg.sender, _weekId, _score, _gameCount, newScore.rank);
+        emit ScoreSubmitted(msg.sender, _weekId, _score, _gameScore, _gameCount, newScore.rank);
     }
 
     /**

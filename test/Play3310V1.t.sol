@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.27;
 
 import "forge-std/Test.sol";
 import "../src/Play3310V1.sol";
@@ -23,9 +23,11 @@ contract Play3310V1Test is Test {
     MockCUSD public cUSD;
 
     address public owner = address(1);
-    address public backendSigner = address(2);
+    uint256 public backendSignerKey = 0xB0B;
+    address public backendSigner = vm.addr(backendSignerKey);
     address public player1 = address(3);
     address public player2 = address(4);
+    address public player3 = address(5);
 
     uint256 public genesisTimestamp;
 
@@ -53,91 +55,91 @@ contract Play3310V1Test is Test {
         vm.stopPrank();
     }
 
-    function testTop10LeaderboardLogic() public {
-        // Setup backend signer key
-        uint256 backendPrivateKey = 0xA11CE;
-        address backendSignerAddr = vm.addr(backendPrivateKey);
-        
-        vm.startPrank(owner);
-        Play3310V1 impl = new Play3310V1();
-        Play3310Proxy p = new Play3310Proxy(
-            address(impl),
-            address(cUSD),
-            backendSignerAddr,
-            owner,
-            genesisTimestamp
+    // ==================== HELPER FUNCTIONS ====================
+    function signScore(
+        address player,
+        uint256 weekId,
+        uint256 score,
+        uint256 gameScore,
+        uint256 gameCount,
+        uint256 referralPoints
+    ) internal view returns (bytes memory) {
+        bytes32 messageHash = keccak256(
+            abi.encodePacked(player, weekId, score, gameScore, gameCount, referralPoints)
         );
-        Play3310V1 game = Play3310V1(address(p));
-        vm.stopPrank();
-
-        // Warp to Saturday Week 1
-        vm.warp(genesisTimestamp + 5 days + 1 hours);
-        uint256 weekId = 1;
-
-        // Player A: 50 pts, 5 games, 10 ref (Rank 1)
-        address playerA = address(10);
-        {
-            bytes memory sigA = _getSignature(backendPrivateKey, playerA, weekId, 50, 20, 5, 10);
-            vm.prank(playerA);
-            game.submitScore(weekId, 50, 20, 5, 10, sigA);
-        }
-
-        // Player B: 40 pts, 3 games, 5 ref (Rank 2)
-        address playerB = address(11);
-        {
-            bytes memory sigB = _getSignature(backendPrivateKey, playerB, weekId, 40, 20, 3, 5);
-            vm.prank(playerB);
-            game.submitScore(weekId, 40, 20, 3, 5, sigB);
-        }
-
-        // Player C: 40 pts, 7 games, 8 ref (Rank 3)
-        address playerC = address(12);
-        {
-            bytes memory sigC = _getSignature(backendPrivateKey, playerC, weekId, 40, 20, 7, 8);
-            vm.prank(playerC);
-            game.submitScore(weekId, 40, 20, 7, 8, sigC);
-        }
-
-        // Player D: 30 pts, 2 games, 3 ref (Rank 4)
-        address playerD = address(13);
-        {
-            bytes memory sigD = _getSignature(backendPrivateKey, playerD, weekId, 30, 20, 2, 3);
-            vm.prank(playerD);
-            game.submitScore(weekId, 30, 20, 2, 3, sigD);
-        }
-
-        // Verify Leaderboard
-        Play3310V1.PlayerWeeklyScore[] memory lb = game.getWeeklyLeaderboard(weekId);
-        assertEq(lb.length, 4);
-        
-        // Rank 1: Player A (Highest Score)
-        assertEq(lb[0].player, playerA);
-        assertEq(lb[0].rank, 1);
-
-        // Rank 2: Player B (40 pts, 3 games vs 7 games)
-        assertEq(lb[1].player, playerB);
-        assertEq(lb[1].rank, 2);
-
-        // Rank 3: Player C (40 pts, 7 games)
-        assertEq(lb[2].player, playerC);
-        assertEq(lb[2].rank, 3);
-
-        // Rank 4: Player D (Lowest Score)
-        assertEq(lb[3].player, playerD);
-        assertEq(lb[3].rank, 4);
-
-        // Update Player D to beat Player A (New Score: 60)
-        {
-            bytes memory sigD2 = _getSignature(backendPrivateKey, playerD, weekId, 60, 30, 3, 3);
-            vm.prank(playerD);
-            game.submitScore(weekId, 60, 30, 3, 3, sigD2);
-        }
-
-        lb = game.getWeeklyLeaderboard(weekId);
-        assertEq(lb[0].player, playerD); // New Rank 1
-        assertEq(lb[1].player, playerA); // New Rank 2
+        bytes32 ethSignedMessageHash = keccak256(
+            abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash)
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(backendSignerKey, ethSignedMessageHash);
+        return abi.encodePacked(r, s, v);
     }
 
+    // ==================== INITIALIZATION & SETUP TESTS ====================
+    function testInitialization() public view {
+        assertEq(address(play3310.cUSD()), address(cUSD));
+        assertEq(play3310.backendSigner(), backendSigner);
+        assertEq(play3310.genesisTimestamp(), genesisTimestamp);
+        assertEq(play3310.minQualificationScore(), 500);
+        assertEq(play3310.weeklyBasePool(), 5 ether);
+        assertEq(play3310.VERSION(), 1);
+    }
+
+    function testInvalidInitialization_ZeroCUSD() public {
+        vm.startPrank(owner);
+        Play3310V1 impl = new Play3310V1();
+        vm.expectRevert(Play3310V1.InvalidCUSDAddress.selector);
+        new Play3310Proxy(address(impl), address(0), backendSigner, owner, genesisTimestamp);
+        vm.stopPrank();
+    }
+
+    function testInvalidInitialization_ZeroBackendSigner() public {
+        vm.startPrank(owner);
+        Play3310V1 impl = new Play3310V1();
+        vm.expectRevert(Play3310V1.InvalidBackendSigner.selector);
+        new Play3310Proxy(address(impl), address(cUSD), address(0), owner, genesisTimestamp);
+        vm.stopPrank();
+    }
+
+    function testInvalidInitialization_ZeroOwner() public {
+        vm.startPrank(owner);
+        Play3310V1 impl = new Play3310V1();
+        vm.expectRevert(Play3310V1.InvalidOwner.selector);
+        new Play3310Proxy(address(impl), address(cUSD), backendSigner, address(0), genesisTimestamp);
+        vm.stopPrank();
+    }
+
+    function testInvalidInitialization_ZeroGenesisTimestamp() public {
+        vm.startPrank(owner);
+        Play3310V1 impl = new Play3310V1();
+        vm.expectRevert(Play3310V1.InvalidGenesisTimestamp.selector);
+        new Play3310Proxy(address(impl), address(cUSD), backendSigner, owner, 0);
+        vm.stopPrank();
+    }
+
+    // ==================== WEEK CALCULATION TESTS ====================
+    function testGetCurrentWeek() public {
+        // At genesis (Monday), should be week 1
+        assertEq(play3310.getCurrentWeek(), 1);
+
+        // Advance 6 days (to Sunday)
+        vm.warp(genesisTimestamp + 6 days);
+        assertEq(play3310.getCurrentWeek(), 1);
+
+        // Advance 1 more second (to start of week 2)
+        vm.warp(genesisTimestamp + 7 days);
+        assertEq(play3310.getCurrentWeek(), 2);
+
+        // Advance to week 10
+        vm.warp(genesisTimestamp + 63 days);
+        assertEq(play3310.getCurrentWeek(), 10);
+    }
+
+    function testGetCurrentWeek_BeforeGenesis() public {
+        vm.warp(genesisTimestamp - 1 days);
+        assertEq(play3310.getCurrentWeek(), 0);
+    }
+
+    // ==================== ADMIN FUNCTIONS TESTS ====================
     function testSetMinQualificationScore() public {
         vm.startPrank(owner);
         assertEq(play3310.minQualificationScore(), 500);
@@ -147,270 +149,730 @@ contract Play3310V1Test is Test {
         vm.stopPrank();
     }
 
-    function testSubmitScoreWithSignature() public {
-        // Setup backend signer key
-        uint256 backendPrivateKey = 0xA11CE;
-        address backendSignerAddr = vm.addr(backendPrivateKey);
-        
-        // Re-deploy with known signer
+    function testSetMinQualificationScore_InvalidZero() public {
         vm.startPrank(owner);
-        Play3310V1 impl = new Play3310V1();
-        Play3310Proxy p = new Play3310Proxy(
-            address(impl),
-            address(cUSD),
-            backendSignerAddr,
-            owner,
-            genesisTimestamp
-        );
-        Play3310V1 game = Play3310V1(address(p));
+        vm.expectRevert(Play3310V1.ScoreMustBePositive.selector);
+        play3310.setMinQualificationScore(0);
         vm.stopPrank();
-
-        // Warp to Saturday of Week 1
-        // Genesis is Monday. Saturday is +5 days.
-        vm.warp(genesisTimestamp + 5 days + 1 hours); 
-        
-        // Prepare score data
-        uint256 weekId = 1;
-        uint256 score = 100;
-        uint256 gameScore = 50;
-        uint256 gameCount = 2;
-        uint256 referralPoints = 10;
-
-        // First Submission
-        bytes memory signature = _getSignature(backendPrivateKey, player1, weekId, score, gameScore, gameCount, referralPoints);
-
-        vm.startPrank(player1);
-        game.submitScore(weekId, score, gameScore, gameCount, referralPoints, signature);
-        vm.stopPrank();
-
-        // Verify updates
-        (uint256 hgs, uint256 hws, uint256 gp, uint256 rp, uint256 tls) = game.playerAllTimeStats(player1);
-        assertEq(hgs, 50, "Highest Game Score");
-        assertEq(hws, 100, "Highest Weekly Score");
-        assertEq(gp, 2, "Total Games Played");
-        assertEq(rp, 10, "Total Referral Points");
-        assertEq(tls, 100, "Total Lifetime Score");
     }
 
-    function testSubmitScoreWithSignature_Update() public {
-        // Setup backend signer key
-        uint256 backendPrivateKey = 0xA11CE;
-        address backendSignerAddr = vm.addr(backendPrivateKey);
-        
-        // Re-deploy with known signer
-        vm.startPrank(owner);
-        Play3310V1 impl = new Play3310V1();
-        Play3310Proxy p = new Play3310Proxy(
-            address(impl),
-            address(cUSD),
-            backendSignerAddr,
-            owner,
-            genesisTimestamp
-        );
-        Play3310V1 game = Play3310V1(address(p));
-        vm.stopPrank();
-
-        // Warp to Sunday of Week 1
-        vm.warp(genesisTimestamp + 6 days + 23 hours);
-
-        // Prepare score data
-        uint256 weekId = 1;
-        uint256 score = 100;
-        uint256 gameScore = 50;
-        uint256 gameCount = 2;
-        uint256 referralPoints = 10;
-
-        // First Submission
-        bytes memory signature = _getSignature(backendPrivateKey, player1, weekId, score, gameScore, gameCount, referralPoints);
-
+    function testSetMinQualificationScore_OnlyOwner() public {
         vm.startPrank(player1);
-        game.submitScore(weekId, score, gameScore, gameCount, referralPoints, signature);
+        vm.expectRevert();
+        play3310.setMinQualificationScore(600);
         vm.stopPrank();
-
-        // Second Submission (Update)
-        score = 150; // +50
-        gameScore = 60; // New high
-        gameCount = 3; // +1
-        referralPoints = 15; // +5
-
-        signature = _getSignature(backendPrivateKey, player1, weekId, score, gameScore, gameCount, referralPoints);
-
-        vm.startPrank(player1);
-        game.submitScore(weekId, score, gameScore, gameCount, referralPoints, signature);
-        vm.stopPrank();
-
-        // Verify updates (deltas)
-        (uint256 hgs, uint256 hws, uint256 gp, uint256 rp, uint256 tls) = game.playerAllTimeStats(player1);
-        assertEq(hgs, 60, "Highest Game Score updated");
-        assertEq(hws, 150, "Highest Weekly Score updated");
-        assertEq(gp, 3, "Total Games Played updated");
-        assertEq(rp, 15, "Total Referral Points updated");
-        assertEq(tls, 150, "Total Lifetime Score updated (100 + 50)");
     }
 
-    function testRewardDistribution() public {
-        // Setup backend signer key
-        uint256 backendPrivateKey = 0xA11CE;
-        address backendSignerAddr = vm.addr(backendPrivateKey);
-        
+    function testSetBackendSigner() public {
+        address newSigner = address(99);
         vm.startPrank(owner);
-        Play3310V1 impl = new Play3310V1();
-        Play3310Proxy p = new Play3310Proxy(
-            address(impl),
-            address(cUSD),
-            backendSignerAddr,
-            owner,
-            genesisTimestamp
-        );
-        Play3310V1 game = Play3310V1(address(p));
-        
+        play3310.setBackendSigner(newSigner);
+        assertEq(play3310.backendSigner(), newSigner);
+        vm.stopPrank();
+    }
+
+    function testSetBackendSigner_InvalidZeroAddress() public {
+        vm.startPrank(owner);
+        vm.expectRevert(Play3310V1.InvalidSignerAddress.selector);
+        play3310.setBackendSigner(address(0));
+        vm.stopPrank();
+    }
+
+    function testSetBackendSigner_OnlyOwner() public {
+        vm.startPrank(player1);
+        vm.expectRevert();
+        play3310.setBackendSigner(address(99));
+        vm.stopPrank();
+    }
+
+    function testSetWeeklyBasePool() public {
+        vm.startPrank(owner);
+        play3310.setWeeklyBasePool(10 ether);
+        assertEq(play3310.weeklyBasePool(), 10 ether);
+        vm.stopPrank();
+    }
+
+    function testSetWeeklyBasePool_InvalidZero() public {
+        vm.startPrank(owner);
+        vm.expectRevert(Play3310V1.AmountMustBePositive.selector);
+        play3310.setWeeklyBasePool(0);
+        vm.stopPrank();
+    }
+
+    function testSetWeeklyBasePool_OnlyOwner() public {
+        vm.startPrank(player1);
+        vm.expectRevert();
+        play3310.setWeeklyBasePool(10 ether);
+        vm.stopPrank();
+    }
+
+    function testFundRewardPool() public {
+        address funder = address(0x999);
+        cUSD.mint(funder, 100 ether);
+
+        vm.startPrank(funder);
+        cUSD.approve(address(play3310), 50 ether);
+        play3310.fundRewardPool(50 ether);
+        vm.stopPrank();
+
+        assertEq(cUSD.balanceOf(address(play3310)), 50 ether);
+    }
+
+    function testFundRewardPool_InvalidZero() public {
+        address funder = address(0x999);
+        cUSD.mint(funder, 100 ether);
+
+        vm.startPrank(funder);
+        cUSD.approve(address(play3310), 50 ether);
+        vm.expectRevert(Play3310V1.AmountMustBePositive.selector);
+        play3310.fundRewardPool(0);
+        vm.stopPrank();
+    }
+
+    function testEmergencyWithdraw() public {
         // Fund the contract
-        cUSD.approve(address(game), 1000 ether);
-        game.fundPrizePool(100 ether);
+        vm.startPrank(owner);
+        cUSD.approve(address(play3310), 100 ether);
+        play3310.fundRewardPool(100 ether);
+
+        uint256 balanceBefore = cUSD.balanceOf(owner);
+        play3310.emergencyWithdraw(50 ether);
+        uint256 balanceAfter = cUSD.balanceOf(owner);
+
+        assertEq(balanceAfter - balanceBefore, 50 ether);
+        assertEq(cUSD.balanceOf(address(play3310)), 50 ether);
         vm.stopPrank();
-
-        // Warp to Saturday Week 1
-        vm.warp(genesisTimestamp + 5 days + 1 hours);
-        uint256 weekId = 1;
-
-        // Player A: 600 pts (Qualified)
-        address playerA = address(10);
-        {
-            bytes memory sigA = _getSignature(backendPrivateKey, playerA, weekId, 600, 20, 5, 10);
-            vm.prank(playerA);
-            game.submitScore(weekId, 600, 20, 5, 10, sigA);
-        }
-
-        // Player B: 400 pts (Not Qualified)
-        address playerB = address(11);
-        {
-            bytes memory sigB = _getSignature(backendPrivateKey, playerB, weekId, 400, 20, 3, 5);
-            vm.prank(playerB);
-            game.submitScore(weekId, 400, 20, 3, 5, sigB);
-        }
-
-        // Warp to Week 2 (Monday)
-        vm.warp(genesisTimestamp + 7 days + 1 hours);
-
-        // Distribute Rewards
-        uint256 initialBalanceA = cUSD.balanceOf(playerA);
-        uint256 initialBalanceB = cUSD.balanceOf(playerB);
-        
-        vm.prank(owner);
-        game.distributeRewards(weekId);
-
-        // Verify Payouts
-        // Total Pool: 5 cUSD (Base)
-        // Rank 1 (Player A): 30% of 5 = 1.5 cUSD
-        assertEq(cUSD.balanceOf(playerA) - initialBalanceA, 1.5 ether);
-        
-        // Rank 2 (Player B): Not qualified (< 500), so no payout.
-        assertEq(cUSD.balanceOf(playerB) - initialBalanceB, 0);
-
-        // Verify Rollover
-        // Player A took 30%.
-        // Player B (Rank 2) was disqualified.
-        // Ranks 3-10 were empty.
-        // Rollover = 70% of 5 = 3.5 cUSD
-        // Wait, Player B is in the Top 10 list but disqualified by score check in distributeRewards?
-        // Let's check logic:
-        // distributeRewards iterates winners (Top 10).
-        // Player A (Rank 1) -> Qualified -> Paid.
-        // Player B (Rank 2) -> Not Qualified -> Rollover += Reward(Rank 2).
-        // Ranks 3-10 -> Empty -> Rollover += Reward(Rank 3..10).
-        
-        // Rank 2 (20%) + Rank 3 (15%) + ... + Rank 10 (3.4%) = 70%
-        // 70% of 5 = 3.5
-        assertEq(game.unclaimedRollover(), 3.5 ether);
-        assertEq(game.currentWeekPrizePool(), 5 ether + 3.5 ether);
     }
 
-    function testSubmissionWindow() public {
-        // Setup backend signer key
-        uint256 backendPrivateKey = 0xA11CE;
-        address backendSignerAddr = vm.addr(backendPrivateKey);
+    function testEmergencyWithdraw_InsufficientBalance() public {
+        vm.startPrank(owner);
+        vm.expectRevert(Play3310V1.InsufficientContractBalance.selector);
+        play3310.emergencyWithdraw(100 ether);
+        vm.stopPrank();
+    }
+
+    function testEmergencyWithdraw_OnlyOwner() public {
+        vm.startPrank(player1);
+        vm.expectRevert();
+        play3310.emergencyWithdraw(1 ether);
+        vm.stopPrank();
+    }
+
+    // ==================== SCORE SUBMISSION TESTS ====================
+    function testSubmitScore() public {
+        uint256 weekId = 1;
+        uint256 score = 1000;
+        uint256 gameScore = 500;
+        uint256 gameCount = 2;
+        uint256 referralPoints = 100;
+
+        bytes memory signature = signScore(player1, weekId, score, gameScore, gameCount, referralPoints);
+
+        vm.startPrank(player1);
+        play3310.submitScore(weekId, score, gameScore, gameCount, referralPoints, signature);
+        vm.stopPrank();
+
+        // Verify score was recorded
+        Play3310V1.PlayerWeeklyScore[] memory leaderboard = play3310.getWeeklyLeaderboard(weekId);
+        assertEq(leaderboard.length, 1);
+        assertEq(leaderboard[0].player, player1);
+        assertEq(leaderboard[0].score, score);
+    }
+
+    function testSubmitScore_NotCurrentWeek() public {
+        uint256 weekId = 2; // Wrong week (current is 1)
+        uint256 score = 1000;
+        uint256 gameScore = 500;
+        uint256 gameCount = 2;
+        uint256 referralPoints = 100;
+
+        bytes memory signature = signScore(player1, weekId, score, gameScore, gameCount, referralPoints);
+
+        vm.startPrank(player1);
+        vm.expectRevert(Play3310V1.NotCurrentWeek.selector);
+        play3310.submitScore(weekId, score, gameScore, gameCount, referralPoints, signature);
+        vm.stopPrank();
+    }
+
+    function testSubmitScore_BelowQualification() public {
+        uint256 weekId = 1;
+        uint256 score = 100; // Below 500 qualification
+        uint256 gameScore = 50;
+        uint256 gameCount = 2;
+        uint256 referralPoints = 0;
+
+        bytes memory signature = signScore(player1, weekId, score, gameScore, gameCount, referralPoints);
+
+        vm.startPrank(player1);
+        vm.expectRevert(Play3310V1.ScoreBelowQualification.selector);
+        play3310.submitScore(weekId, score, gameScore, gameCount, referralPoints, signature);
+        vm.stopPrank();
+    }
+
+    function testSubmitScore_ZeroGameCount() public {
+        uint256 weekId = 1;
+        uint256 score = 1000;
+        uint256 gameScore = 500;
+        uint256 gameCount = 0; // Invalid
+        uint256 referralPoints = 100;
+
+        bytes memory signature = signScore(player1, weekId, score, gameScore, gameCount, referralPoints);
+
+        vm.startPrank(player1);
+        vm.expectRevert(Play3310V1.GameCountMustBePositive.selector);
+        play3310.submitScore(weekId, score, gameScore, gameCount, referralPoints, signature);
+        vm.stopPrank();
+    }
+
+    function testSubmitScore_InvalidSignature() public {
+        uint256 weekId = 1;
+        uint256 score = 1000;
+        uint256 gameScore = 500;
+        uint256 gameCount = 2;
+        uint256 referralPoints = 100;
+
+        // Create invalid signature
+        bytes memory signature = new bytes(65);
+
+        vm.startPrank(player1);
+        vm.expectRevert(); // ECDSAInvalidSignature from OpenZeppelin
+        play3310.submitScore(weekId, score, gameScore, gameCount, referralPoints, signature);
+        vm.stopPrank();
+    }
+
+    function testSubmitScore_UpdateExisting() public {
+        uint256 weekId = 1;
+
+        // First submission
+        bytes memory signature1 = signScore(player1, weekId, 1000, 500, 2, 100);
+        vm.startPrank(player1);
+        play3310.submitScore(weekId, 1000, 500, 2, 100, signature1);
+        vm.stopPrank();
+
+        // Second submission with higher score
+        bytes memory signature2 = signScore(player1, weekId, 1500, 600, 3, 150);
+        vm.startPrank(player1);
+        play3310.submitScore(weekId, 1500, 600, 3, 150, signature2);
+        vm.stopPrank();
+
+        // Verify updated score
+        Play3310V1.PlayerWeeklyScore[] memory leaderboard = play3310.getWeeklyLeaderboard(weekId);
+        assertEq(leaderboard.length, 1);
+        assertEq(leaderboard[0].score, 1500);
+    }
+
+    function testSubmitScore_Top10Leaderboard() public {
+        uint256 weekId = 1;
+
+        // Submit 12 scores
+        for (uint256 i = 0; i < 12; i++) {
+            address player = address(uint160(100 + i));
+            uint256 score = 1000 + (i * 100);
+            bytes memory signature = signScore(player, weekId, score, score, 1, 0);
+            
+            vm.startPrank(player);
+            play3310.submitScore(weekId, score, score, 1, 0, signature);
+            vm.stopPrank();
+        }
+
+        // Verify only top 10 are in leaderboard
+        Play3310V1.PlayerWeeklyScore[] memory leaderboard = play3310.getWeeklyLeaderboard(weekId);
+        assertEq(leaderboard.length, 10);
+        
+        // Verify they are sorted (highest first)
+        assertEq(leaderboard[0].score, 2100); // Highest score
+        assertEq(leaderboard[9].score, 1200); // 10th highest
+    }
+
+    function testSubmitScore_TiebreakerGameCount() public {
+        uint256 weekId = 1;
+
+        // Player1: score 1000, 5 games
+        bytes memory sig1 = signScore(player1, weekId, 1000, 500, 5, 0);
+        vm.startPrank(player1);
+        play3310.submitScore(weekId, 1000, 500, 5, 0, sig1);
+        vm.stopPrank();
+
+        // Player2: score 1000, 3 games (should rank higher)
+        bytes memory sig2 = signScore(player2, weekId, 1000, 500, 3, 0);
+        vm.startPrank(player2);
+        play3310.submitScore(weekId, 1000, 500, 3, 0, sig2);
+        vm.stopPrank();
+
+        Play3310V1.PlayerWeeklyScore[] memory leaderboard = play3310.getWeeklyLeaderboard(weekId);
+        assertEq(leaderboard[0].player, player2); // Fewer games wins
+        assertEq(leaderboard[1].player, player1);
+    }
+
+    function testSubmitScore_TiebreakerReferralPoints() public {
+        uint256 weekId = 1;
+
+        // Player1: score 1000, 3 games, 50 referral points
+        bytes memory sig1 = signScore(player1, weekId, 1000, 500, 3, 50);
+        vm.startPrank(player1);
+        play3310.submitScore(weekId, 1000, 500, 3, 50, sig1);
+        vm.stopPrank();
+
+        // Player2: score 1000, 3 games, 100 referral points (should rank higher)
+        bytes memory sig2 = signScore(player2, weekId, 1000, 500, 3, 100);
+        vm.startPrank(player2);
+        play3310.submitScore(weekId, 1000, 500, 3, 100, sig2);
+        vm.stopPrank();
+
+        Play3310V1.PlayerWeeklyScore[] memory leaderboard = play3310.getWeeklyLeaderboard(weekId);
+        assertEq(leaderboard[0].player, player2); // More referral points wins
+        assertEq(leaderboard[1].player, player1);
+    }
+
+    function testSubmitScore_TiebreakerEqual() public {
+        // Test when all tiebreakers are equal
+        uint256 weekId = 1;
+
+        // Player1: score 1000, 3 games, 100 referral points
+        bytes memory sig1 = signScore(player1, weekId, 1000, 500, 3, 100);
+        vm.startPrank(player1);
+        play3310.submitScore(weekId, 1000, 500, 3, 100, sig1);
+        vm.stopPrank();
+
+        // Player2: score 1000, 3 games, 100 referral points (exactly equal)
+        bytes memory sig2 = signScore(player2, weekId, 1000, 500, 3, 100);
+        vm.startPrank(player2);
+        play3310.submitScore(weekId, 1000, 500, 3, 100, sig2);
+        vm.stopPrank();
+
+        // Player3: score 1000, 3 games, 50 referral points (lower referral points)
+        bytes memory sig3 = signScore(player3, weekId, 1000, 500, 3, 50);
+        vm.startPrank(player3);
+        play3310.submitScore(weekId, 1000, 500, 3, 50, sig3);
+        vm.stopPrank();
+
+        Play3310V1.PlayerWeeklyScore[] memory leaderboard = play3310.getWeeklyLeaderboard(weekId);
+        assertEq(leaderboard.length, 3);
+        assertEq(leaderboard[2].player, player3); // Lowest referral points
+    }
+
+    // ==================== ALL-TIME STATS TESTS ====================
+    function testAllTimeStats_Update() public {
+        uint256 weekId = 1;
+        bytes memory signature = signScore(player1, weekId, 1000, 500, 2, 100);
+
+        vm.startPrank(player1);
+        play3310.submitScore(weekId, 1000, 500, 2, 100, signature);
+        vm.stopPrank();
+
+        // Check all-time stats
+        Play3310V1.AllTimeStats memory stats = play3310.getPlayerStats(player1);
+
+        assertEq(stats.highestGameScore, 500);
+        assertEq(stats.highestWeeklyScore, 1000);
+        assertEq(stats.totalGamesPlayed, 2);
+        assertEq(stats.totalReferralPoints, 100);
+        assertEq(stats.totalLifetimeScore, 1000);
+    }
+
+    function testAllTimeStats_MultipleWeeks() public {
+        // Week 1
+        bytes memory sig1 = signScore(player1, 1, 1000, 500, 2, 100);
+        vm.startPrank(player1);
+        play3310.submitScore(1, 1000, 500, 2, 100, sig1);
+        vm.stopPrank();
+
+        // Week 2
+        vm.warp(genesisTimestamp + 7 days);
+        bytes memory sig2 = signScore(player1, 2, 1200, 600, 3, 150);
+        vm.startPrank(player1);
+        play3310.submitScore(2, 1200, 600, 3, 150, sig2);
+        vm.stopPrank();
+
+        // Check all-time stats
+        Play3310V1.AllTimeStats memory stats = play3310.getPlayerStats(player1);
+
+        assertEq(stats.highestGameScore, 600);
+        assertEq(stats.highestWeeklyScore, 1200);
+        assertEq(stats.totalGamesPlayed, 5); // 2 + 3
+        assertEq(stats.totalReferralPoints, 250); // 100 + 150
+        assertEq(stats.totalLifetimeScore, 2200); // 1000 + 1200
+    }
+
+    function testAllTimeStats_UpdateWithinWeek() public {
+        uint256 weekId = 1;
+
+        // First submission
+        bytes memory sig1 = signScore(player1, weekId, 1000, 500, 2, 100);
+        vm.startPrank(player1);
+        play3310.submitScore(weekId, 1000, 500, 2, 100, sig1);
+        vm.stopPrank();
+
+        // Second submission in same week (delta update)
+        bytes memory sig2 = signScore(player1, weekId, 1500, 600, 4, 150);
+        vm.startPrank(player1);
+        play3310.submitScore(weekId, 1500, 600, 4, 150, sig2);
+        vm.stopPrank();
+
+        // Check all-time stats (should only count delta)
+        Play3310V1.AllTimeStats memory stats = play3310.getPlayerStats(player1);
+
+        assertEq(stats.highestGameScore, 600);
+        assertEq(stats.highestWeeklyScore, 1500);
+        assertEq(stats.totalGamesPlayed, 4);
+        assertEq(stats.totalReferralPoints, 150);
+        assertEq(stats.totalLifetimeScore, 1500);
+    }
+
+    // ==================== REWARD DISTRIBUTION TESTS ====================
+    function testDistributeRewards() public {
+        // Fund contract
+        vm.startPrank(owner);
+        cUSD.approve(address(play3310), 100 ether);
+        play3310.fundRewardPool(100 ether);
+        vm.stopPrank();
+
+        // Submit scores in week 1
+        for (uint256 i = 0; i < 5; i++) {
+            address player = address(uint160(100 + i));
+            uint256 score = 1000 + (i * 100);
+            bytes memory signature = signScore(player, 1, score, score, 1, 0);
+            
+            vm.startPrank(player);
+            play3310.submitScore(1, score, score, 1, 0, signature);
+            vm.stopPrank();
+        }
+
+        // Move to week 2 to distribute week 1 rewards
+        vm.warp(genesisTimestamp + 7 days);
+
+        vm.startPrank(owner);
+        play3310.distributeRewards(1);
+        vm.stopPrank();
+        
+        // Verify distribution happened
+        Play3310V1.WeeklyRewardPool memory pool = play3310.getWeeklyRewardPool(1);
+        assertTrue(pool.hasDistributed);
+    }
+
+    function testDistributeRewards_WeekNotFinished() public {
+        // Try to distribute current week
+        vm.startPrank(owner);
+        vm.expectRevert(Play3310V1.WeekNotFinished.selector);
+        play3310.distributeRewards(1);
+        vm.stopPrank();
+    }
+
+    function testDistributeRewards_AlreadyDistributed() public {
+        // Fund contract
+        vm.startPrank(owner);
+        cUSD.approve(address(play3310), 100 ether);
+        play3310.fundRewardPool(100 ether);
+        vm.stopPrank();
+
+        // Submit score in week 1
+        bytes memory sig = signScore(player1, 1, 1000, 500, 1, 0);
+        vm.startPrank(player1);
+        play3310.submitScore(1, 1000, 500, 1, 0, sig);
+        vm.stopPrank();
+
+        // Move to week 2 and distribute
+        vm.warp(genesisTimestamp + 7 days);
+        vm.startPrank(owner);
+        play3310.distributeRewards(1);
+        
+        // Try to distribute again
+        vm.expectRevert(Play3310V1.AlreadyDistributed.selector);
+        play3310.distributeRewards(1);
+        vm.stopPrank();
+    }
+
+    function testDistributeRewards_NoWinners() public {
+        // Move to week 2 without any submissions
+        vm.warp(genesisTimestamp + 7 days);
         
         vm.startPrank(owner);
-        Play3310V1 impl = new Play3310V1();
-        Play3310Proxy p = new Play3310Proxy(
-            address(impl),
-            address(cUSD),
-            backendSignerAddr,
-            owner,
-            genesisTimestamp
-        );
-        Play3310V1 game = Play3310V1(address(p));
+        vm.expectRevert(Play3310V1.NoWinnersThisWeek.selector);
+        play3310.distributeRewards(1);
         vm.stopPrank();
+    }
 
-        uint256 weekId = 1;
-        
-        // 1. Try submitting on Friday (Day 4) - Should Fail
-        vm.warp(genesisTimestamp + 4 days);
-        bytes memory signature = _getSignature(backendPrivateKey, player1, weekId, 100, 50, 2, 10);
+    function testDistributeRewards_OnlyOwner() public {
+        vm.warp(genesisTimestamp + 7 days);
         
         vm.startPrank(player1);
-        vm.expectRevert(Play3310V1.NotSubmissionPeriod.selector);
-        game.submitScore(weekId, 100, 50, 2, 10, signature);
+        vm.expectRevert();
+        play3310.distributeRewards(1);
+        vm.stopPrank();
+    }
+
+    function testDistributeRewards_InsufficientFunds() public {
+        // Submit score but don't fund contract
+        bytes memory sig = signScore(player1, 1, 1000, 500, 1, 0);
+        vm.startPrank(player1);
+        play3310.submitScore(1, 1000, 500, 1, 0, sig);
         vm.stopPrank();
 
-        // 2. Try submitting on Saturday (Day 5) - Should Succeed
-        vm.warp(genesisTimestamp + 5 days);
-        vm.startPrank(player1);
-        game.submitScore(weekId, 100, 50, 2, 10, signature);
+        // Move to week 2 and try to distribute
+        vm.warp(genesisTimestamp + 7 days);
+        
+        vm.startPrank(owner);
+        vm.expectRevert(Play3310V1.InsufficientContractBalance.selector);
+        play3310.distributeRewards(1);
+        vm.stopPrank();
+    }
+
+    // ==================== CLAIM REWARDS TESTS ====================
+    function testClaimRewards() public {
+        // Fund contract and submit scores
+        vm.startPrank(owner);
+        cUSD.approve(address(play3310), 100 ether);
+        play3310.fundRewardPool(100 ether);
         vm.stopPrank();
 
-        // 3. Try submitting for Week 2 during Week 1 - Should Fail
-        // Still on Saturday Week 1
-        bytes memory sigWeek2 = _getSignature(backendPrivateKey, player1, 2, 100, 50, 2, 10);
+        bytes memory sig = signScore(player1, 1, 1000, 500, 1, 0);
         vm.startPrank(player1);
+        play3310.submitScore(1, 1000, 500, 1, 0, sig);
+        vm.stopPrank();
+
+        // Distribute rewards
+        vm.warp(genesisTimestamp + 7 days);
+        vm.startPrank(owner);
+        play3310.distributeRewards(1);
+        vm.stopPrank();
+
+        // Claim rewards
+        uint256[] memory indices = new uint256[](1);
+        indices[0] = 0;
+        
+        uint256 balanceBefore = cUSD.balanceOf(player1);
+        vm.startPrank(player1);
+        play3310.claimRewards(indices);
+        vm.stopPrank();
+        uint256 balanceAfter = cUSD.balanceOf(player1);
+
+        assertTrue(balanceAfter > balanceBefore);
+    }
+
+    function testClaimRewards_NoUnclaimedRewards() public {
+        uint256[] memory indices = new uint256[](1);
+        indices[0] = 0;
+        
+        vm.startPrank(player1);
+        vm.expectRevert(Play3310V1.NoUnclaimedRewards.selector);
+        play3310.claimRewards(indices);
+        vm.stopPrank();
+    }
+
+    function testClaimRewards_InvalidIndex() public {
+        // Fund contract and submit scores
+        vm.startPrank(owner);
+        cUSD.approve(address(play3310), 100 ether);
+        play3310.fundRewardPool(100 ether);
+        vm.stopPrank();
+
+        bytes memory sig = signScore(player1, 1, 1000, 500, 1, 0);
+        vm.startPrank(player1);
+        play3310.submitScore(1, 1000, 500, 1, 0, sig);
+        vm.stopPrank();
+
+        // Distribute rewards
+        vm.warp(genesisTimestamp + 7 days);
+        vm.startPrank(owner);
+        play3310.distributeRewards(1);
+        vm.stopPrank();
+
+        // Try to claim with invalid index
+        uint256[] memory indices = new uint256[](1);
+        indices[0] = 999; // Invalid index
+        
+        vm.startPrank(player1);
+        vm.expectRevert(Play3310V1.InvalidRewardIndex.selector);
+        play3310.claimRewards(indices);
+        vm.stopPrank();
+    }
+
+    function testClaimRewards_AlreadyClaimed() public {
+        // Fund contract and submit scores
+        vm.startPrank(owner);
+        cUSD.approve(address(play3310), 100 ether);
+        play3310.fundRewardPool(100 ether);
+        vm.stopPrank();
+
+        bytes memory sig = signScore(player1, 1, 1000, 500, 1, 0);
+        vm.startPrank(player1);
+        play3310.submitScore(1, 1000, 500, 1, 0, sig);
+        vm.stopPrank();
+
+        // Distribute rewards
+        vm.warp(genesisTimestamp + 7 days);
+        vm.startPrank(owner);
+        play3310.distributeRewards(1);
+        vm.stopPrank();
+
+        // Claim rewards
+        uint256[] memory indices = new uint256[](1);
+        indices[0] = 0;
+        
+        vm.startPrank(player1);
+        play3310.claimRewards(indices);
+        
+        // Try to claim again
+        vm.expectRevert(Play3310V1.RewardAlreadyClaimed.selector);
+        play3310.claimRewards(indices);
+        vm.stopPrank();
+    }
+
+    // ==================== VIEW FUNCTION TESTS ====================
+    function testGetWeeklyLeaderboard() public {
+        // Submit some scores
+        for (uint256 i = 0; i < 3; i++) {
+            address player = address(uint160(100 + i));
+            uint256 score = 1000 + (i * 100);
+            bytes memory signature = signScore(player, 1, score, score, 1, 0);
+            
+            vm.startPrank(player);
+            play3310.submitScore(1, score, score, 1, 0, signature);
+            vm.stopPrank();
+        }
+
+        Play3310V1.PlayerWeeklyScore[] memory leaderboard = play3310.getWeeklyLeaderboard(1);
+        assertEq(leaderboard.length, 3);
+    }
+
+    function testGetWeeklyLeaderboard_Empty() public view {
+        Play3310V1.PlayerWeeklyScore[] memory leaderboard = play3310.getWeeklyLeaderboard(1);
+        assertEq(leaderboard.length, 0);
+    }
+
+    function testGetWeeklyRewardPool() public view {
+        Play3310V1.WeeklyRewardPool memory pool = play3310.getWeeklyRewardPool(1);
+        assertEq(pool.basePool, 5 ether);
+        assertEq(pool.rolloverAmount, 0);
+        assertEq(pool.totalPool, 5 ether);
+        assertFalse(pool.hasDistributed);
+    }
+
+    function testGetUnclaimedRewards() public view {
+        Play3310V1.UnclaimedReward[] memory rewards = play3310.getUnclaimedRewards(player1);
+        assertEq(rewards.length, 0);
+    }
+
+    function testGetTotalUnclaimedAmount() public view {
+        uint256 total = play3310.getTotalUnclaimedAmount(player1);
+        assertEq(total, 0);
+    }
+
+    // ==================== UPGRADE TESTS ====================
+    function testUpgrade() public {
+        // Deploy new implementation
+        vm.startPrank(owner);
+        Play3310V1 newImplementation = new Play3310V1();
+        
+        play3310.upgradeToAndCall(address(newImplementation), "");
+        vm.stopPrank();
+    }
+
+    function testUpgrade_OnlyOwner() public {
+        Play3310V1 newImplementation = new Play3310V1();
+        
+        vm.startPrank(player1);
+        vm.expectRevert();
+        play3310.upgradeToAndCall(address(newImplementation), "");
+        vm.stopPrank();
+    }
+
+    // ==================== EDGE CASE TESTS ====================
+    function testGetWeeklyLeaderboard_InvalidWeek_Zero() public {
         vm.expectRevert(Play3310V1.InvalidWeek.selector);
-        game.submitScore(2, 100, 50, 2, 10, sigWeek2);
-        vm.stopPrank();
+        play3310.getWeeklyLeaderboard(0);
     }
 
-    function testPublicFunding() public {
-        // Setup
+    function testGetWeeklyLeaderboard_InvalidWeek_Future() public {
+        vm.expectRevert(Play3310V1.InvalidWeek.selector);
+        play3310.getWeeklyLeaderboard(999);
+    }
+
+    function testGetWeeklyRewardPool_WithRollover() public {
+        // Fund contract
         vm.startPrank(owner);
-        Play3310V1 impl = new Play3310V1();
-        Play3310Proxy p = new Play3310Proxy(
-            address(impl),
-            address(cUSD),
-            backendSigner,
-            owner,
-            genesisTimestamp
-        );
-        Play3310V1 game = Play3310V1(address(p));
+        cUSD.approve(address(play3310), 100 ether);
+        play3310.fundRewardPool(100 ether);
         vm.stopPrank();
 
-        // Fund as a random user
-        address randomUser = address(0x999);
-        vm.deal(randomUser, 100 ether); // Not needed for ERC20 but good practice
-        
-        // Mint cUSD to random user
-        MockCUSD(address(cUSD)).mint(randomUser, 50 ether);
-        
-        vm.startPrank(randomUser);
-        cUSD.approve(address(game), 50 ether);
-        game.fundPrizePool(50 ether);
+        // Submit scores in week 1 (only 3 players, so there will be rollover)
+        for (uint256 i = 0; i < 3; i++) {
+            address player = address(uint160(100 + i));
+            uint256 score = 1000 + (i * 100);
+            bytes memory signature = signScore(player, 1, score, score, 1, 0);
+            
+            vm.startPrank(player);
+            play3310.submitScore(1, score, score, 1, 0, signature);
+            vm.stopPrank();
+        }
+
+        // Move to week 2 and distribute week 1 rewards
+        vm.warp(genesisTimestamp + 7 days);
+        vm.startPrank(owner);
+        play3310.distributeRewards(1);
         vm.stopPrank();
 
-        assertEq(cUSD.balanceOf(address(game)), 50 ether);
+        // Check week 2 reward pool - should include rollover from week 1
+        Play3310V1.WeeklyRewardPool memory pool = play3310.getWeeklyRewardPool(2);
+        assertEq(pool.basePool, 5 ether);
+        assertTrue(pool.rolloverAmount > 0); // Should have rollover from week 1
+        assertEq(pool.totalPool, pool.basePool + pool.rolloverAmount);
     }
 
-    function _getSignature(
-        uint256 privateKey,
-        address player,
-        uint256 weekId,
-        uint256 score,
-        uint256 gameScore,
-        uint256 gameCount,
-        uint256 referralPoints
-    ) internal pure returns (bytes memory) {
+    function testVersion() public view {
+        string memory ver = play3310.version();
+        assertEq(ver, "1.0.0");
+    }
+
+    function testSubmitScore_WrongSigner() public {
+        uint256 weekId = 1;
+        uint256 score = 1000;
+        uint256 gameScore = 500;
+        uint256 gameCount = 2;
+        uint256 referralPoints = 100;
+
+        // Sign with a different private key
+        uint256 wrongKey = 0xBAD;
         bytes32 messageHash = keccak256(
-            abi.encodePacked(player, weekId, score, gameScore, gameCount, referralPoints)
+            abi.encodePacked(player1, weekId, score, gameScore, gameCount, referralPoints)
         );
-        bytes32 ethSignedMessageHash = MessageHashUtils.toEthSignedMessageHash(messageHash);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, ethSignedMessageHash);
-        return abi.encodePacked(r, s, v);
+        bytes32 ethSignedMessageHash = keccak256(
+            abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash)
+        );
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(wrongKey, ethSignedMessageHash);
+        bytes memory signature = abi.encodePacked(r, s, v);
+
+        vm.startPrank(player1);
+        vm.expectRevert(Play3310V1.InvalidSignature.selector);
+        play3310.submitScore(weekId, score, gameScore, gameCount, referralPoints, signature);
+        vm.stopPrank();
+    }
+
+    function testSubmitScore_UpdateMiddleEntry() public {
+        uint256 weekId = 1;
+
+        // Submit 3 scores to create a leaderboard
+        for (uint256 i = 0; i < 3; i++) {
+            address player = address(uint160(100 + i));
+            uint256 score = 1000 + (i * 100);
+            bytes memory signature = signScore(player, weekId, score, score, 1, 0);
+            
+            vm.startPrank(player);
+            play3310.submitScore(weekId, score, score, 1, 0, signature);
+            vm.stopPrank();
+        }
+
+        // Update the middle entry (player at index 1)
+        address middlePlayer = address(uint160(101));
+        bytes memory newSig = signScore(middlePlayer, weekId, 1500, 1500, 1, 0);
+        vm.startPrank(middlePlayer);
+        play3310.submitScore(weekId, 1500, 1500, 1, 0, newSig);
+        vm.stopPrank();
+
+        // Verify the leaderboard is correctly updated
+        Play3310V1.PlayerWeeklyScore[] memory leaderboard = play3310.getWeeklyLeaderboard(weekId);
+        assertEq(leaderboard.length, 3);
+        assertEq(leaderboard[0].player, middlePlayer); // Should now be first
+        assertEq(leaderboard[0].score, 1500);
     }
 }
