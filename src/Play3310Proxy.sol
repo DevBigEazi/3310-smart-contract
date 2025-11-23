@@ -14,7 +14,8 @@ contract Play3310Proxy is ERC1967Proxy {
         address _implementation,
         address _cUSD,
         address _backendSigner,
-        address _initialOwner
+        address _initialOwner,
+        uint256 _genesisTimestamp
     )
         ERC1967Proxy(
             _implementation,
@@ -22,7 +23,8 @@ contract Play3310Proxy is ERC1967Proxy {
                 Play3310V1.initialize.selector,
                 _cUSD,
                 _backendSigner,
-                _initialOwner
+                _initialOwner,
+                _genesisTimestamp
             )
         )
     {}
@@ -49,7 +51,8 @@ contract Play3310Factory {
     function deployPlay3310(
         address _cUSD,
         address _backendSigner,
-        address _initialOwner
+        address _initialOwner,
+        uint256 _genesisTimestamp
     ) external returns (Play3310V1 proxy) {
         // Deploy implementation
         Play3310V1 implementation = new Play3310V1();
@@ -59,7 +62,8 @@ contract Play3310Factory {
             address(implementation),
             _cUSD,
             _backendSigner,
-            _initialOwner
+            _initialOwner,
+            _genesisTimestamp
         );
 
         // Return proxy as Play3310V1 interface

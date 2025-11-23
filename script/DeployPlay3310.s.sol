@@ -26,12 +26,18 @@ contract DeployPlay3310 is Script {
         Play3310V1 implementation = new Play3310V1();
         console.log("Implementation deployed at: %s", address(implementation));
 
+        // Calculate most recent Monday (approximate or use env)
+        // Unix Epoch was Thursday. (timestamp / 86400 + 4) % 7 == 0 is Monday?
+        // Let's just use current time for now or env
+        uint256 genesisTimestamp = vm.envOr("GENESIS_TIMESTAMP", block.timestamp);
+
         // Deploy proxy with initialization
         Play3310Proxy proxy = new Play3310Proxy(
             address(implementation),
             cUSD,
             backendSigner,
-            msg.sender
+            msg.sender,
+            genesisTimestamp
         );
         console.log("Proxy deployed at: %s", address(proxy));
 
