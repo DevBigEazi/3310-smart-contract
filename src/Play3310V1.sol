@@ -31,6 +31,20 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     error InsufficientBalance();
     error NoUnclaimedRewards();
     error InvalidClaimAmount();
+    error InvalidCUSDAddress();
+    error InvalidBackendSigner();
+    error InvalidOwner();
+    error InvalidGenesisTimestamp();
+    error ScoreMustBePositive();
+    error InvalidSignerAddress();
+    error AmountMustBePositive();
+    error InvalidRewardIndex();
+    error RewardAlreadyClaimed();
+    error GameCountMustBePositive();
+    error NotCurrentWeek();
+    error InsufficientContractBalance();
+    error NoWinnersThisWeek();
+    error InsufficientFunds();
 
     // ==================== VERSION ====================
     uint256 public constant VERSION = 1;
@@ -141,7 +155,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
 
     // ==================== MODIFIERS ====================
     modifier validWeek(uint256 _weekId) {
-        require(_weekId > 0 && _weekId <= getCurrentWeek(), "Invalid week");
+        if (_weekId == 0 || _weekId > getCurrentWeek()) revert InvalidWeek();
         _;
     }
 
@@ -159,10 +173,10 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         address _initialOwner,
         uint256 _genesisTimestamp
     ) public initializer {
-        require(_cUSD != address(0), "Invalid cUSD address");
-        require(_backendSigner != address(0), "Invalid backend signer");
-        require(_initialOwner != address(0), "Invalid owner");
-        require(_genesisTimestamp > 0, "Invalid genesis timestamp");
+        if (_cUSD == address(0)) revert InvalidCUSDAddress();
+        if (_backendSigner == address(0)) revert InvalidBackendSigner();
+        if (_initialOwner == address(0)) revert InvalidOwner();
+        if (_genesisTimestamp == 0) revert InvalidGenesisTimestamp();
 
         __Ownable_init(_initialOwner);
 
@@ -182,7 +196,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @param _newScore New minimum score required
      */
     function setMinQualificationScore(uint256 _newScore) external onlyOwner {
-        require(_newScore > 0, "Score must be positive");
+        if (_newScore == 0) revert ScoreMustBePositive();
         minQualificationScore = _newScore;
         emit MinQualificationScoreUpdated(_newScore);
     }
@@ -192,7 +206,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @param _newSigner New signer address
      */
     function setBackendSigner(address _newSigner) external onlyOwner {
-        require(_newSigner != address(0), "Invalid signer address");
+        if (_newSigner == address(0)) revert InvalidSignerAddress();
         backendSigner = _newSigner;
     }
 
@@ -201,7 +215,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @param _newAmount New base pool in wei
      */
     function setWeeklyBasePool(uint256 _newAmount) external onlyOwner {
-        require(_newAmount > 0, "Amount must be positive");
+        if (_newAmount == 0) revert AmountMustBePositive();
         weeklyBasePool = _newAmount;
     }
 
@@ -210,7 +224,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @param _amount Amount of cUSD to transfer
      */
     function fundRewardPool(uint256 _amount) external nonReentrant {
-        require(_amount > 0, "Amount must be positive");
+        if (_amount == 0) revert AmountMustBePositive();
         cUSD.safeTransferFrom(msg.sender, address(this), _amount);
     }
 
@@ -219,7 +233,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @param _amount Amount to withdraw
      */
     function emergencyWithdraw(uint256 _amount) external onlyOwner nonReentrant {
-        require(_amount <= cUSD.balanceOf(address(this)), "Insufficient balance");
+        if (_amount > cUSD.balanceOf(address(this))) revert InsufficientContractBalance();
         cUSD.safeTransfer(owner(), _amount);
     }
 
@@ -358,9 +372,9 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         bytes calldata _signature
     ) external {
         // Verify week is current
-        require(_weekId == getCurrentWeek(), "Not current week");
-        require(_score >= minQualificationScore, "Score below minimum qualification");
-        require(_gameCount > 0, "Invalid game count");
+        if (_weekId != getCurrentWeek()) revert NotCurrentWeek();
+        if (_score < minQualificationScore) revert ScoreBelowQualification();
+        if (_gameCount == 0) revert GameCountMustBePositive();
 
         // Verify signature
         bytes32 messageHash = keccak256(
@@ -369,7 +383,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         bytes32 ethSignedMessageHash = messageHash.toEthSignedMessageHash();
 
         address signer = ethSignedMessageHash.recover(_signature);
-        require(signer == backendSigner, "Invalid signature");
+        if (signer != backendSigner) revert InvalidSignature();
 
         // Create player score entry
         PlayerWeeklyScore memory newScore = PlayerWeeklyScore({
@@ -521,11 +535,11 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @param _weekId Week to distribute rewards for
      */
     function distributeRewards(uint256 _weekId) external onlyOwner nonReentrant validWeek(_weekId) {
-        require(_weekId < getCurrentWeek(), "Week not finished");
-        require(!_isWeekDistributed[_weekId], "Already distributed");
+        if (_weekId >= getCurrentWeek()) revert WeekNotFinished();
+        if (_isWeekDistributed[_weekId]) revert AlreadyDistributed();
 
         PlayerWeeklyScore[] memory winners = weeklyLeaderboards[_weekId];
-        require(winners.length > 0, "No winners this week");
+        if (winners.length == 0) revert NoWinnersThisWeek();
 
         // Get or calculate reward pool
         WeeklyRewardPool storage pool = weeklyRewardPools[_weekId];
@@ -538,7 +552,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         }
 
         // Verify sufficient balance
-        require(cUSD.balanceOf(address(this)) >= pool.totalPool, "Insufficient contract balance");
+        if (cUSD.balanceOf(address(this)) < pool.totalPool) revert InsufficientContractBalance();
 
         uint256 distributedAmount = 0;
         uint256 rolloverForNextWeek = 0;
@@ -595,7 +609,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      */
     function claimRewards(uint256[] calldata _indices) external nonReentrant {
         UnclaimedReward[] storage rewards = unclaimedRewards[msg.sender];
-        require(rewards.length > 0, "No unclaimed rewards");
+        if (rewards.length == 0) revert NoUnclaimedRewards();
 
         uint256 totalClaim = 0;
         uint256 claimedCount = 0;
@@ -613,8 +627,8 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
             // Claim specific indices
             for (uint256 i = 0; i < _indices.length; i++) {
                 uint256 idx = _indices[i];
-                require(idx < rewards.length, "Invalid reward index");
-                require(!rewards[idx].claimed, "Reward already claimed");
+                if (idx >= rewards.length) revert InvalidRewardIndex();
+                if (rewards[idx].claimed) revert RewardAlreadyClaimed();
                 
                 totalClaim += rewards[idx].amount;
                 rewards[idx].claimed = true;
@@ -622,8 +636,8 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
             }
         }
 
-        require(totalClaim > 0, "No rewards to claim");
-        require(cUSD.balanceOf(address(this)) >= totalClaim, "Insufficient contract balance");
+        if (totalClaim == 0) revert InvalidClaimAmount();
+        if (cUSD.balanceOf(address(this)) < totalClaim) revert InsufficientContractBalance();
 
         totalUnclaimedAmount[msg.sender] -= totalClaim;
         cUSD.safeTransfer(msg.sender, totalClaim);
