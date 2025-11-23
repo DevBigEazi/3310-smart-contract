@@ -345,7 +345,7 @@ contract Play3310V1Test is Test {
         bytes memory signature = _getSignature(backendPrivateKey, player1, weekId, 100, 50, 2, 10);
         
         vm.startPrank(player1);
-        vm.expectRevert("Not submission period");
+        vm.expectRevert(Play3310V1.NotSubmissionPeriod.selector);
         game.submitScore(weekId, 100, 50, 2, 10, signature);
         vm.stopPrank();
 
@@ -359,7 +359,7 @@ contract Play3310V1Test is Test {
         // Still on Saturday Week 1
         bytes memory sigWeek2 = _getSignature(backendPrivateKey, player1, 2, 100, 50, 2, 10);
         vm.startPrank(player1);
-        vm.expectRevert("Invalid week");
+        vm.expectRevert(Play3310V1.InvalidWeek.selector);
         game.submitScore(2, 100, 50, 2, 10, sigWeek2);
         vm.stopPrank();
     }

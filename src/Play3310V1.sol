@@ -9,19 +9,20 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
-// ==================== CUSTOM ERRORS ====================
-error InvalidSignature();
-error TransferFailed();
-error InvalidDistribution();
-error ScoreBelowQualification();
-
-/**
- * @title Play3310
- * @dev Upgradeable gaming reward distribution contract with UUPS pattern
- */
 contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, ReentrancyGuard {
     using ECDSA for bytes32;
     using MessageHashUtils for bytes32;
+
+    // ==================== CUSTOM ERRORS ====================
+    error InvalidSignature();
+    error TransferFailed();
+    error InvalidDistribution();
+    error ScoreBelowQualification();
+    error NotSubmissionPeriod();
+    error InvalidWeek();
+    error WeekNotFinished();
+    error NothingToDistribute();
+    error AlreadyDistributed();
 
     // ==================== VERSION ====================
     uint256 public constant VERSION = 1;
@@ -116,7 +117,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @param amount Amount of cUSD to deposit
      */
     function fundPrizePool(uint256 amount) external onlyOwner {
-        require(cUSD.transferFrom(msg.sender, address(this), amount), "Transfer failed");
+        if (!cUSD.transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
     }
 
     // ==================== VIEW FUNCTIONS ====================
@@ -172,8 +173,8 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         uint256 referralPoints,
         bytes calldata signature
     ) external {
-        require(isSubmissionPeriod(), "Not submission period");
-        require(weekId == getCurrentWeek(), "Invalid week");
+        if (!isSubmissionPeriod()) revert NotSubmissionPeriod();
+        if (weekId != getCurrentWeek()) revert InvalidWeek();
 
         // Verify signature
         bytes32 messageHash = keccak256(
@@ -275,14 +276,14 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @param weekId The week to distribute rewards for
      */
     function distributeRewards(uint256 weekId) external onlyOwner {
-        require(weekId < getCurrentWeek(), "Week not finished");
-        require(weeklyLeaderboards[weekId].length > 0 || weeklyPrizePool > 0, "Nothing to distribute");
+        if (weekId >= getCurrentWeek()) revert WeekNotFinished();
+        if (weeklyLeaderboards[weekId].length == 0 && weeklyPrizePool == 0) revert NothingToDistribute();
         
         // Ensure we haven't already distributed for this week? 
         // We can check if the leaderboard exists or add a mapping. 
         // For now, we assume the admin manages this or we clear the leaderboard after (which we shouldn't do if we want history).
         // Let's add a mapping to track distribution status.
-        require(!_isWeekDistributed[weekId], "Already distributed");
+        if (_isWeekDistributed[weekId]) revert AlreadyDistributed();
 
         uint256 totalPool = weeklyPrizePool + unclaimedRollover;
         uint256 distributedAmount = 0;
@@ -299,7 +300,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
                 
                 // Check qualification score again just in case (though Top 10 logic should handle it)
                 if (winners[i].score >= minQualificationScore) {
-                    require(cUSD.transfer(winners[i].player, reward), "Transfer failed");
+                    if (!cUSD.transfer(winners[i].player, reward)) revert TransferFailed();
                     distributedAmount += reward;
                 } else {
                     // Should not happen if Top 10 logic filters, but if it does, it rolls over
