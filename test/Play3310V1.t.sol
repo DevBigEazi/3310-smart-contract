@@ -10,6 +10,10 @@ contract MockCUSD is ERC20 {
     constructor() ERC20("Celo Dollar", "cUSD") {
         _mint(msg.sender, 1000000 ether);
     }
+
+    function mint(address to, uint256 amount) public {
+        _mint(to, amount);
+    }
 }
 
 contract Play3310V1Test is Test {
@@ -362,6 +366,35 @@ contract Play3310V1Test is Test {
         vm.expectRevert(Play3310V1.InvalidWeek.selector);
         game.submitScore(2, 100, 50, 2, 10, sigWeek2);
         vm.stopPrank();
+    }
+
+    function testPublicFunding() public {
+        // Setup
+        vm.startPrank(owner);
+        Play3310V1 impl = new Play3310V1();
+        Play3310Proxy p = new Play3310Proxy(
+            address(impl),
+            address(cUSD),
+            backendSigner,
+            owner,
+            genesisTimestamp
+        );
+        Play3310V1 game = Play3310V1(address(p));
+        vm.stopPrank();
+
+        // Fund as a random user
+        address randomUser = address(0x999);
+        vm.deal(randomUser, 100 ether); // Not needed for ERC20 but good practice
+        
+        // Mint cUSD to random user
+        MockCUSD(address(cUSD)).mint(randomUser, 50 ether);
+        
+        vm.startPrank(randomUser);
+        cUSD.approve(address(game), 50 ether);
+        game.fundPrizePool(50 ether);
+        vm.stopPrank();
+
+        assertEq(cUSD.balanceOf(address(game)), 50 ether);
     }
 
     function _getSignature(
