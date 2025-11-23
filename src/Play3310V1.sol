@@ -60,6 +60,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     mapping(uint256 => PlayerWeeklyScore[]) public weeklyLeaderboards;
     mapping(address => AllTimeStats) public playerAllTimeStats;
     mapping(uint256 => mapping(address => PlayerWeeklyScore)) public weeklyPlayerScores;
+    mapping(uint256 => bool) private _isWeekDistributed;
   
     event ContractUpgraded(address indexed newImplementation, uint256 version);
     event WeeklyLeaderboardSubmitted(uint256 indexed weekId, uint256 playerCount);
@@ -264,6 +265,66 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
                 leaderboard[i].rank = i + 1;
             }
         }
+    }
+
+    event RewardsDistributed(uint256 indexed weekId, uint256 totalDistributed, uint256 rolloverAmount);
+    event RolloverUpdated(uint256 newRollover);
+
+    /**
+     * @dev Distribute rewards for a specific week
+     * @param weekId The week to distribute rewards for
+     */
+    function distributeRewards(uint256 weekId) external onlyOwner {
+        require(weekId < getCurrentWeek(), "Week not finished");
+        require(weeklyLeaderboards[weekId].length > 0 || weeklyPrizePool > 0, "Nothing to distribute");
+        
+        // Ensure we haven't already distributed for this week? 
+        // We can check if the leaderboard exists or add a mapping. 
+        // For now, we assume the admin manages this or we clear the leaderboard after (which we shouldn't do if we want history).
+        // Let's add a mapping to track distribution status.
+        require(!_isWeekDistributed[weekId], "Already distributed");
+
+        uint256 totalPool = weeklyPrizePool + unclaimedRollover;
+        uint256 distributedAmount = 0;
+        uint256 rolloverForNextWeek = 0;
+
+        PlayerWeeklyScore[] memory winners = weeklyLeaderboards[weekId];
+        uint256 winnerCount = winners.length;
+
+        // Distribute to winners
+        for (uint256 i = 0; i < winnerCount; i++) {
+            // Safety check: ensure we have a distribution percentage for this rank
+            if (i < prizeDistribution.length) {
+                uint256 reward = (totalPool * prizeDistribution[i]) / 10000;
+                
+                // Check qualification score again just in case (though Top 10 logic should handle it)
+                if (winners[i].score >= minQualificationScore) {
+                    require(cUSD.transfer(winners[i].player, reward), "Transfer failed");
+                    distributedAmount += reward;
+                } else {
+                    // Should not happen if Top 10 logic filters, but if it does, it rolls over
+                    rolloverForNextWeek += reward;
+                }
+            }
+        }
+
+        // Calculate rollover for unfilled ranks
+        if (winnerCount < 10) {
+            for (uint256 i = winnerCount; i < 10; i++) {
+                if (i < prizeDistribution.length) {
+                    uint256 unsoldReward = (totalPool * prizeDistribution[i]) / 10000;
+                    rolloverForNextWeek += unsoldReward;
+                }
+            }
+        }
+
+        // Update state
+        _isWeekDistributed[weekId] = true;
+        unclaimedRollover = rolloverForNextWeek;
+        currentWeekPrizePool = weeklyPrizePool + rolloverForNextWeek; // Set for next week display
+
+        emit RewardsDistributed(weekId, distributedAmount, rolloverForNextWeek);
+        emit RolloverUpdated(rolloverForNextWeek);
     }
 
     function _updateAllTimeStatsWithDelta(

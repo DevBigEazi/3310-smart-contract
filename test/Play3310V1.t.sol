@@ -244,6 +244,83 @@ contract Play3310V1Test is Test {
         assertEq(tls, 150, "Total Lifetime Score updated (100 + 50)");
     }
 
+    function testRewardDistribution() public {
+        // Setup backend signer key
+        uint256 backendPrivateKey = 0xA11CE;
+        address backendSignerAddr = vm.addr(backendPrivateKey);
+        
+        vm.startPrank(owner);
+        Play3310V1 impl = new Play3310V1();
+        Play3310Proxy p = new Play3310Proxy(
+            address(impl),
+            address(cUSD),
+            backendSignerAddr,
+            owner,
+            genesisTimestamp
+        );
+        Play3310V1 game = Play3310V1(address(p));
+        
+        // Fund the contract
+        cUSD.approve(address(game), 1000 ether);
+        game.fundPrizePool(100 ether);
+        vm.stopPrank();
+
+        // Warp to Saturday Week 1
+        vm.warp(genesisTimestamp + 5 days + 1 hours);
+        uint256 weekId = 1;
+
+        // Player A: 600 pts (Qualified)
+        address playerA = address(10);
+        {
+            bytes memory sigA = _getSignature(backendPrivateKey, playerA, weekId, 600, 20, 5, 10);
+            vm.prank(playerA);
+            game.submitScore(weekId, 600, 20, 5, 10, sigA);
+        }
+
+        // Player B: 400 pts (Not Qualified)
+        address playerB = address(11);
+        {
+            bytes memory sigB = _getSignature(backendPrivateKey, playerB, weekId, 400, 20, 3, 5);
+            vm.prank(playerB);
+            game.submitScore(weekId, 400, 20, 3, 5, sigB);
+        }
+
+        // Warp to Week 2 (Monday)
+        vm.warp(genesisTimestamp + 7 days + 1 hours);
+
+        // Distribute Rewards
+        uint256 initialBalanceA = cUSD.balanceOf(playerA);
+        uint256 initialBalanceB = cUSD.balanceOf(playerB);
+        
+        vm.prank(owner);
+        game.distributeRewards(weekId);
+
+        // Verify Payouts
+        // Total Pool: 5 cUSD (Base)
+        // Rank 1 (Player A): 30% of 5 = 1.5 cUSD
+        assertEq(cUSD.balanceOf(playerA) - initialBalanceA, 1.5 ether);
+        
+        // Rank 2 (Player B): Not qualified (< 500), so no payout.
+        assertEq(cUSD.balanceOf(playerB) - initialBalanceB, 0);
+
+        // Verify Rollover
+        // Player A took 30%.
+        // Player B (Rank 2) was disqualified.
+        // Ranks 3-10 were empty.
+        // Rollover = 70% of 5 = 3.5 cUSD
+        // Wait, Player B is in the Top 10 list but disqualified by score check in distributeRewards?
+        // Let's check logic:
+        // distributeRewards iterates winners (Top 10).
+        // Player A (Rank 1) -> Qualified -> Paid.
+        // Player B (Rank 2) -> Not Qualified -> Rollover += Reward(Rank 2).
+        // Ranks 3-10 -> Empty -> Rollover += Reward(Rank 3..10).
+        
+        // Rank 2 (20%) + Rank 3 (15%) + ... + Rank 10 (3.4%) = 70%
+        // 70% of 5 = 3.5
+        assertEq(game.unclaimedRollover(), 3.5 ether);
+        assertEq(game.currentWeekPrizePool(), 5 ether + 3.5 ether);
+    }
+
     function testSubmissionWindow() public {
         // Setup backend signer key
         uint256 backendPrivateKey = 0xA11CE;
