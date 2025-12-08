@@ -12,10 +12,15 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title Play3310V1
- * @dev Main game contract for 3310 - Real-time leaderboard with weekly rewards
+ * @dev Main game contract for 3310 - Real-time leaderboard with daily rewards
  * @notice Supports real-time score submission with Top 10 leaderboard and reward escrow
  */
-contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, ReentrancyGuard {
+contract Play3310V1 is
+    Initializable,
+    OwnableUpgradeable,
+    UUPSUpgradeable,
+    ReentrancyGuard
+{
     using ECDSA for bytes32;
     using MessageHashUtils for bytes32;
     using SafeERC20 for IERC20;
@@ -24,8 +29,8 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     error InvalidSignature();
     error TransferFailed();
     error ScoreBelowQualification();
-    error InvalidWeek();
-    error WeekNotFinished();
+    error InvalidDay();
+    error DayNotFinished();
     error NothingToDistribute();
     error AlreadyDistributed();
     error InsufficientBalance();
@@ -41,9 +46,9 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     error InvalidRewardIndex();
     error RewardAlreadyClaimed();
     error GameCountMustBePositive();
-    error NotCurrentWeek();
+    error NotCurrentDay();
     error InsufficientContractBalance();
-    error NoWinnersThisWeek();
+    error NoWinnersThisDay();
     error InsufficientFunds();
     error ScoreCannotDecrease();
     error ScoreTooHigh();
@@ -53,61 +58,62 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     uint256 public constant VERSION = 1;
 
     // ==================== STRUCTS ====================
-    struct PlayerWeeklyScore {
+    struct PlayerDailyScore {
         address player;
-        uint256 score;              // Weekly accumulated score
-        uint256 gameScore;          // Highest single game score
-        uint256 gameCount;          // Total games played this week
-        uint256 referralPoints;     // Referral points earned
-        uint256 rank;               // Leaderboard rank (1-10)
+        uint256 score; // Daily accumulated score
+        uint256 gameScore; // Highest single game score
+        uint256 gameCount; // Total games played this day
+        uint256 referralPoints; // Referral points earned
+        uint256 rank; // Leaderboard rank (1-10)
     }
 
     struct AllTimeStats {
-        uint256 highestGameScore;      // Highest single game all-time
-        uint256 highestWeeklyScore;    // Highest weekly score all-time
-        uint256 totalGamesPlayed;      // Total games across all weeks
-        uint256 totalReferralPoints;   // Total referral points earned
-        uint256 totalLifetimeScore;    // Total points across all weeks
+        uint256 highestGameScore; // Highest single game all-time
+        uint256 highestDailyScore; // Highest daily score all-time
+        uint256 totalGamesPlayed; // Total games across all days
+        uint256 totalReferralPoints; // Total referral points earned
+        uint256 totalLifetimeScore; // Total points across all days
     }
 
-    struct WeeklyRewardPool {
-        uint256 basePool;              // $5 base pool for the week
-        uint256 rolloverAmount;        // Rolled over from previous week
-        uint256 totalPool;             // basePool + rolloverAmount
-        bool hasDistributed;           // Whether rewards have been distributed
+    struct DailyRewardPool {
+        uint256 basePool; // $5 base pool for the day
+        uint256 rolloverAmount; // Rolled over from previous day
+        uint256 totalPool; // basePool + rolloverAmount
+        bool hasDistributed; // Whether rewards have been distributed
     }
 
     struct UnclaimedReward {
-        uint256 weekId;                // Week the reward was earned
-        uint256 amount;                // Reward amount in wei
-        bool claimed;                  // Whether this reward has been claimed
+        uint256 dayId; // Day the reward was earned
+        uint256 amount; // Reward amount in wei
+        bool claimed; // Whether this reward has been claimed
     }
 
     // ==================== STATE ====================
     IERC20 public cUSD;
     address public backendSigner;
 
-    uint256 public weeklyBasePool;                  // $5 per week in wei
-    uint256 public minQualificationScore;           // Default: 500
-    uint256 public maxScore;                        // Maximum allowed score (anti-cheat)
-    uint256 public genesisTimestamp;                // First Monday 00:00 UTC
+    uint256 public dailyBasePool; // $5 per day in wei
+    uint256 public minQualificationScore; // Default: 500
+    uint256 public maxScore; // Maximum allowed score (anti-cheat)
+    uint256 public genesisTimestamp; // Start of day 1 (00:00 UTC)
 
-    uint256[] public prizeDistribution;             // Basis points for each rank
+    uint256[] public prizeDistribution; // Basis points for each rank
 
-    // Weekly leaderboards: weekId => PlayerWeeklyScore[]
-    mapping(uint256 => PlayerWeeklyScore[]) public weeklyLeaderboards;
+    // Daily leaderboards: dayId => PlayerDailyScore[]
+    mapping(uint256 => PlayerDailyScore[]) public dailyLeaderboards;
 
-    // Weekly player scores for quick lookup: weekId => player => score
-    mapping(uint256 => mapping(address => PlayerWeeklyScore)) public weeklyPlayerScores;
+    // Daily player scores for quick lookup: dayId => player => score
+    mapping(uint256 => mapping(address => PlayerDailyScore))
+        public dailyPlayerScores;
 
     // All-time stats for players
     mapping(address => AllTimeStats) public playerAllTimeStats;
 
-    // Track weekly reward pools
-    mapping(uint256 => WeeklyRewardPool) public weeklyRewardPools;
+    // Track daily reward pools
+    mapping(uint256 => DailyRewardPool) public dailyRewardPools;
 
-    // Track if week has been distributed
-    mapping(uint256 => bool) private _isWeekDistributed;
+    // Track if day has been distributed
+    mapping(uint256 => bool) private _isDayDistributed;
 
     // Unclaimed rewards escrow: player => UnclaimedReward[]
     mapping(address => UnclaimedReward[]) public unclaimedRewards;
@@ -121,40 +127,37 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     // ==================== EVENTS ====================
     event ScoreSubmitted(
         address indexed player,
-        uint256 indexed weekId,
-        uint256 weeklyScore,
+        uint256 indexed dayId,
+        uint256 dailyScore,
         uint256 gameScore,
         uint256 gameCount,
         uint256 rank
     );
 
-    event LeaderboardUpdated(
-        uint256 indexed weekId,
-        uint256 topTenCount
-    );
+    event LeaderboardUpdated(uint256 indexed dayId, uint256 topTenCount);
 
     event AllTimeStatsUpdated(
         address indexed player,
         uint256 highestGameScore,
-        uint256 highestWeeklyScore
+        uint256 highestDailyScore
     );
 
     event RewardsDistributed(
-        uint256 indexed weekId,
+        uint256 indexed dayId,
         uint256 totalDistributed,
         uint256 rolloverAmount
     );
 
     event RewardEscrowed(
         address indexed player,
-        uint256 indexed weekId,
+        uint256 indexed dayId,
         uint256 amount
     );
 
     event RewardClaimed(
         address indexed player,
         uint256 totalAmount,
-        uint256 weekCount
+        uint256 dayCount
     );
 
     event MinQualificationScoreUpdated(uint256 newScore);
@@ -168,8 +171,8 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     );
 
     // ==================== MODIFIERS ====================
-    modifier validWeek(uint256 _weekId) {
-        if (_weekId == 0 || _weekId > getCurrentWeek()) revert InvalidWeek();
+    modifier validDay(uint256 _dayId) {
+        if (_dayId == 0 || _dayId > getCurrentDay()) revert InvalidDay();
         _;
     }
 
@@ -201,13 +204,24 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
 
         cUSD = IERC20(_cUSD);
         backendSigner = _backendSigner;
-        weeklyBasePool = 5 ether;  // $5 in wei (assuming 18 decimals)
+        dailyBasePool = 5 ether; // $5 per day in wei (assuming 18 decimals)
         minQualificationScore = 500;
         maxScore = 100000; // Maximum score limit
         genesisTimestamp = _genesisTimestamp;
 
         // Initialize prize distribution (basis points, total = 10000)
-        prizeDistribution = [3000, 2000, 1500, 1000, 800, 340, 340, 340, 340, 340];
+        prizeDistribution = [
+            3000,
+            2000,
+            1500,
+            1000,
+            800,
+            340,
+            340,
+            340,
+            340,
+            340
+        ];
     }
 
     // ==================== ADMIN FUNCTIONS ====================
@@ -240,12 +254,12 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     }
 
     /**
-     * @dev Update weekly base pool amount
+     * @dev Update daily base pool amount
      * @param _newAmount New base pool in wei
      */
-    function setWeeklyBasePool(uint256 _newAmount) external onlyOwner {
+    function setDailyBasePool(uint256 _newAmount) external onlyOwner {
         if (_newAmount == 0) revert AmountMustBePositive();
-        weeklyBasePool = _newAmount;
+        dailyBasePool = _newAmount;
     }
 
     /**
@@ -253,12 +267,15 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @param _player Player address
      * @param _points New total referral points
      */
-    function updateReferralPoints(address _player, uint256 _points) external onlyBackendSigner {
+    function updateReferralPoints(
+        address _player,
+        uint256 _points
+    ) external onlyBackendSigner {
         uint256 oldPoints = playerReferralPoints[_player];
         playerReferralPoints[_player] = _points;
-        
+
         uint256 delta = _points > oldPoints ? _points - oldPoints : 0;
-        
+
         emit ReferralPointsUpdated(_player, _points, delta);
     }
 
@@ -275,56 +292,52 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @dev Emergency withdraw - only owner
      * @param _amount Amount to withdraw
      */
-    function emergencyWithdraw(uint256 _amount) external onlyOwner nonReentrant {
-        if (_amount > cUSD.balanceOf(address(this))) revert InsufficientContractBalance();
+    function emergencyWithdraw(
+        uint256 _amount
+    ) external onlyOwner nonReentrant {
+        if (_amount > cUSD.balanceOf(address(this)))
+            revert InsufficientContractBalance();
         cUSD.safeTransfer(owner(), _amount);
     }
 
     // ==================== VIEW FUNCTIONS ====================
     /**
-     * @dev Get current week number (1-based)
+     * @dev Get current day number (1-based)
      */
-    function getCurrentWeek() public view returns (uint256) {
+    function getCurrentDay() public view returns (uint256) {
         if (block.timestamp < genesisTimestamp) return 0;
-        return (block.timestamp - genesisTimestamp) / 7 days + 1;
+        return (block.timestamp - genesisTimestamp) / 1 days + 1;
     }
 
     /**
-     * @dev Get weekly leaderboard for a specific week
-     * @param _weekId Week identifier
+     * @dev Get daily leaderboard for a specific day
+     * @param _dayId Day identifier
      */
-    function getWeeklyLeaderboard(uint256 _weekId)
-        external
-        view
-        validWeek(_weekId)
-        returns (PlayerWeeklyScore[] memory)
-    {
-        return weeklyLeaderboards[_weekId];
+    function getDailyLeaderboard(
+        uint256 _dayId
+    ) external view validDay(_dayId) returns (PlayerDailyScore[] memory) {
+        return dailyLeaderboards[_dayId];
     }
 
     /**
-     * @dev P3: Get player's weekly stats
-     * @param _weekId Week identifier
+     * @dev P3: Get player's daily stats
+     * @param _dayId Day identifier
      * @param _player Player address
      */
-    function getPlayerWeeklyStats(uint256 _weekId, address _player)
-        external
-        view
-        validWeek(_weekId)
-        returns (PlayerWeeklyScore memory)
-    {
-        return weeklyPlayerScores[_weekId][_player];
+    function getPlayerDailyStats(
+        uint256 _dayId,
+        address _player
+    ) external view validDay(_dayId) returns (PlayerDailyScore memory) {
+        return dailyPlayerScores[_dayId][_player];
     }
 
     /**
      * @dev Get player's all-time stats
      * @param _player Player address
      */
-    function getPlayerStats(address _player)
-        external
-        view
-        returns (AllTimeStats memory)
-    {
+    function getPlayerStats(
+        address _player
+    ) external view returns (AllTimeStats memory) {
         return playerAllTimeStats[_player];
     }
 
@@ -332,28 +345,28 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @dev P2: Get player's on-chain referral points
      * @param _player Player address
      */
-    function getReferralPoints(address _player) external view returns (uint256) {
+    function getReferralPoints(
+        address _player
+    ) external view returns (uint256) {
         return playerReferralPoints[_player];
     }
 
     /**
-     * @dev Get weekly reward pool info
-     * @param _weekId Week identifier
+     * @dev Get daily reward pool info
+     * @param _dayId Day identifier
      */
-    function getWeeklyRewardPool(uint256 _weekId)
-        external
-        view
-        validWeek(_weekId)
-        returns (WeeklyRewardPool memory)
-    {
-        WeeklyRewardPool memory pool = weeklyRewardPools[_weekId];
+    function getDailyRewardPool(
+        uint256 _dayId
+    ) external view validDay(_dayId) returns (DailyRewardPool memory) {
+        DailyRewardPool memory pool = dailyRewardPools[_dayId];
         if (pool.basePool == 0) {
             // Initialize if not set
-            pool.basePool = weeklyBasePool;
-            if (_weekId > 1) {
-                // Add rollover from previous week if available
-                if (_isWeekDistributed[_weekId - 1]) {
-                    pool.rolloverAmount = weeklyRewardPools[_weekId - 1].rolloverAmount;
+            pool.basePool = dailyBasePool;
+            if (_dayId > 1) {
+                // Add rollover from previous day if available
+                if (_isDayDistributed[_dayId - 1]) {
+                    pool.rolloverAmount = dailyRewardPools[_dayId - 1]
+                        .rolloverAmount;
                 }
             }
             pool.totalPool = pool.basePool + pool.rolloverAmount;
@@ -365,11 +378,9 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @dev Get unclaimed rewards for a player
      * @param _player Player address
      */
-    function getUnclaimedRewards(address _player)
-        external
-        view
-        returns (UnclaimedReward[] memory)
-    {
+    function getUnclaimedRewards(
+        address _player
+    ) external view returns (UnclaimedReward[] memory) {
         return unclaimedRewards[_player];
     }
 
@@ -377,11 +388,9 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @dev Get total unclaimed amount for a player
      * @param _player Player address
      */
-    function getTotalUnclaimedAmount(address _player)
-        external
-        view
-        returns (uint256)
-    {
+    function getTotalUnclaimedAmount(
+        address _player
+    ) external view returns (uint256) {
         return totalUnclaimedAmount[_player];
     }
 
@@ -411,7 +420,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         if (scoreA < scoreB) return false;
 
         // Tied on score - now check tiebreakers
-        
+
         // Tiebreaker 1: Fewest games played (more efficient)
         if (gameCountA < gameCountB) return true;
         if (gameCountA > gameCountB) return false;
@@ -421,26 +430,26 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
 
         return false;
     }
-    
+
     /**
      * @dev Submit score and update Top 10 leaderboard
-     * @param _weekId Current week ID
-     * @param _score Weekly accumulated score
+     * @param _dayId Current day ID
+     * @param _score Daily accumulated score
      * @param _gameScore Highest single game score
-     * @param _gameCount Total games played this week
+     * @param _gameCount Total games played this day
      * @param _referralPoints Referral points earned
      * @param _signature Backend signature for verification
      */
     function submitScore(
-        uint256 _weekId,
+        uint256 _dayId,
         uint256 _score,
         uint256 _gameScore,
         uint256 _gameCount,
         uint256 _referralPoints,
         bytes calldata _signature
     ) external {
-        // Verify week is current
-        if (_weekId != getCurrentWeek()) revert NotCurrentWeek();
+        // Verify day is current
+        if (_dayId != getCurrentDay()) revert NotCurrentDay();
         if (_score < minQualificationScore) revert ScoreBelowQualification();
         if (_gameCount == 0) revert GameCountMustBePositive();
 
@@ -450,25 +459,37 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
 
         // Verify signature
         bytes32 messageHash = keccak256(
-            abi.encodePacked(msg.sender, _weekId, _score, _gameScore, _gameCount, _referralPoints)
+            abi.encodePacked(
+                msg.sender,
+                _dayId,
+                _score,
+                _gameScore,
+                _gameCount,
+                _referralPoints
+            )
         );
-        
+
         // Backend already uses signMessageSync which adds Ethereum prefix
         // So we recover directly without adding prefix again
-        address signer = messageHash.toEthSignedMessageHash().recover(_signature);
+        address signer = messageHash.toEthSignedMessageHash().recover(
+            _signature
+        );
         if (signer != backendSigner) revert InvalidSignature();
 
         // Get previous score if exists
-        PlayerWeeklyScore memory prevScore = weeklyPlayerScores[_weekId][msg.sender];
+        PlayerDailyScore memory prevScore = dailyPlayerScores[_dayId][
+            msg.sender
+        ];
 
         // Validate score can only increase (cumulative scoring)
         if (prevScore.score > 0) {
             if (_score < prevScore.score) revert ScoreCannotDecrease();
-            if (_gameCount < prevScore.gameCount) revert GameCountCannotDecrease();
+            if (_gameCount < prevScore.gameCount)
+                revert GameCountCannotDecrease();
         }
 
         // Create player score entry
-        PlayerWeeklyScore memory newScore = PlayerWeeklyScore({
+        PlayerDailyScore memory newScore = PlayerDailyScore({
             player: msg.sender,
             score: _score,
             gameScore: _gameScore,
@@ -480,20 +501,30 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         // Update all-time stats with delta
         _updateAllTimeStatsWithDelta(newScore, prevScore);
 
-        // Update weekly mapping
-        weeklyPlayerScores[_weekId][msg.sender] = newScore;
+        // Update daily mapping
+        dailyPlayerScores[_dayId][msg.sender] = newScore;
 
         // Update Top 10 leaderboard
-        _updateTop10Leaderboard(_weekId, newScore);
+        _updateTop10Leaderboard(_dayId, newScore);
 
-        emit ScoreSubmitted(msg.sender, _weekId, _score, _gameScore, _gameCount, newScore.rank);
+        emit ScoreSubmitted(
+            msg.sender,
+            _dayId,
+            _score,
+            _gameScore,
+            _gameCount,
+            newScore.rank
+        );
     }
 
     /**
      * @dev Internal: Update Top 10 leaderboard with new score
      */
-    function _updateTop10Leaderboard(uint256 _weekId, PlayerWeeklyScore memory _newEntry) internal {
-        PlayerWeeklyScore[] storage leaderboard = weeklyLeaderboards[_weekId];
+    function _updateTop10Leaderboard(
+        uint256 _dayId,
+        PlayerDailyScore memory _newEntry
+    ) internal {
+        PlayerDailyScore[] storage leaderboard = dailyLeaderboards[_dayId];
 
         // 1. Find if player already exists
         int256 existingIndex = -1;
@@ -506,7 +537,11 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
 
         // 2. Remove existing entry if found
         if (existingIndex != -1) {
-            for (uint256 i = uint256(existingIndex); i < leaderboard.length - 1; i++) {
+            for (
+                uint256 i = uint256(existingIndex);
+                i < leaderboard.length - 1;
+                i++
+            ) {
                 leaderboard[i] = leaderboard[i + 1];
             }
             leaderboard.pop();
@@ -514,7 +549,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
 
         // 3. If leaderboard is full and new score doesn't qualify, skip
         if (leaderboard.length >= 10) {
-            PlayerWeeklyScore memory lastPlace = leaderboard[9];
+            PlayerDailyScore memory lastPlace = leaderboard[9];
             if (
                 !_isBetterScore(
                     _newEntry.score,
@@ -525,7 +560,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
                     lastPlace.referralPoints
                 )
             ) {
-                return;  // Not good enough for Top 10
+                return; // Not good enough for Top 10
             }
         }
 
@@ -565,7 +600,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
                 leaderboard[i].rank = i + 1;
             }
 
-            emit LeaderboardUpdated(_weekId, leaderboard.length);
+            emit LeaderboardUpdated(_dayId, leaderboard.length);
         }
     }
 
@@ -573,8 +608,8 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @dev Internal: Update all-time stats with delta from previous submission
      */
     function _updateAllTimeStatsWithDelta(
-        PlayerWeeklyScore memory _newScore,
-        PlayerWeeklyScore memory _prevScore
+        PlayerDailyScore memory _newScore,
+        PlayerDailyScore memory _prevScore
     ) internal {
         AllTimeStats storage stats = playerAllTimeStats[_newScore.player];
 
@@ -583,18 +618,20 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
             stats.highestGameScore = _newScore.gameScore;
         }
 
-        // Update highest weekly score
-        if (_newScore.score > stats.highestWeeklyScore) {
-            stats.highestWeeklyScore = _newScore.score;
+        // Update highest daily score
+        if (_newScore.score > stats.highestDailyScore) {
+            stats.highestDailyScore = _newScore.score;
         }
 
         // Calculate deltas (handling resubmissions)
         if (_newScore.gameCount > _prevScore.gameCount) {
-            stats.totalGamesPlayed += (_newScore.gameCount - _prevScore.gameCount);
+            stats.totalGamesPlayed += (_newScore.gameCount -
+                _prevScore.gameCount);
         }
 
         if (_newScore.referralPoints > _prevScore.referralPoints) {
-            stats.totalReferralPoints += (_newScore.referralPoints - _prevScore.referralPoints);
+            stats.totalReferralPoints += (_newScore.referralPoints -
+                _prevScore.referralPoints);
         }
 
         if (_newScore.score > _prevScore.score) {
@@ -604,45 +641,53 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         emit AllTimeStatsUpdated(
             _newScore.player,
             stats.highestGameScore,
-            stats.highestWeeklyScore
+            stats.highestDailyScore
         );
     }
 
     // ==================== REWARD FUNCTIONS ====================
     /**
-     * @dev Distribute rewards for a completed week (called by owner on Monday)
-     * @param _weekId Week to distribute rewards for
+     * @dev Distribute rewards for a completed day (called by owner daily)
+     * @param _dayId Day to distribute rewards for
      */
-    function distributeRewards(uint256 _weekId) external onlyOwner nonReentrant validWeek(_weekId) {
-        if (_weekId >= getCurrentWeek()) revert WeekNotFinished();
-        if (_isWeekDistributed[_weekId]) revert AlreadyDistributed();
+    function distributeRewards(
+        uint256 _dayId
+    ) external onlyOwner nonReentrant validDay(_dayId) {
+        if (_dayId >= getCurrentDay()) revert DayNotFinished();
+        if (_isDayDistributed[_dayId]) revert AlreadyDistributed();
 
-        PlayerWeeklyScore[] memory winners = weeklyLeaderboards[_weekId];
-        if (winners.length == 0) revert NoWinnersThisWeek();
+        PlayerDailyScore[] memory winners = dailyLeaderboards[_dayId];
+        if (winners.length == 0) revert NoWinnersThisDay();
 
         // Get or calculate reward pool
-        WeeklyRewardPool storage pool = weeklyRewardPools[_weekId];
+        DailyRewardPool storage pool = dailyRewardPools[_dayId];
         if (pool.basePool == 0) {
-            pool.basePool = weeklyBasePool;
-            if (_weekId > 1 && _isWeekDistributed[_weekId - 1]) {
-                pool.rolloverAmount = weeklyRewardPools[_weekId - 1].rolloverAmount;
+            pool.basePool = dailyBasePool;
+            if (_dayId > 1 && _isDayDistributed[_dayId - 1]) {
+                pool.rolloverAmount = dailyRewardPools[_dayId - 1]
+                    .rolloverAmount;
             }
             pool.totalPool = pool.basePool + pool.rolloverAmount;
         }
 
         // Verify sufficient balance
-        if (cUSD.balanceOf(address(this)) < pool.totalPool) revert InsufficientContractBalance();
+        if (cUSD.balanceOf(address(this)) < pool.totalPool)
+            revert InsufficientContractBalance();
 
         uint256 distributedAmount = 0;
         uint256 rolloverForNextWeek = 0;
 
         // Distribute to Top 10 winners (only to qualified players)
-        for (uint256 i = 0; i < winners.length && i < prizeDistribution.length; i++) {
+        for (
+            uint256 i = 0;
+            i < winners.length && i < prizeDistribution.length;
+            i++
+        ) {
             uint256 reward = (pool.totalPool * prizeDistribution[i]) / 10000;
 
             if (winners[i].score >= minQualificationScore) {
                 // Place reward in escrow instead of transferring immediately
-                _addToEscrow(winners[i].player, _weekId, reward);
+                _addToEscrow(winners[i].player, _dayId, reward);
                 distributedAmount += reward;
             } else {
                 // Should not happen if Top 10 is filtered correctly
@@ -652,8 +697,13 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
 
         // Calculate rollover for unfilled ranks
         if (winners.length < 10) {
-            for (uint256 i = winners.length; i < 10 && i < prizeDistribution.length; i++) {
-                uint256 unclaimedReward = (pool.totalPool * prizeDistribution[i]) / 10000;
+            for (
+                uint256 i = winners.length;
+                i < 10 && i < prizeDistribution.length;
+                i++
+            ) {
+                uint256 unclaimedReward = (pool.totalPool *
+                    prizeDistribution[i]) / 10000;
                 rolloverForNextWeek += unclaimedReward;
             }
         }
@@ -661,29 +711,31 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         // Update state
         pool.hasDistributed = true;
         pool.rolloverAmount = rolloverForNextWeek;
-        _isWeekDistributed[_weekId] = true;
+        _isDayDistributed[_dayId] = true;
 
-        emit RewardsDistributed(_weekId, distributedAmount, rolloverForNextWeek);
+        emit RewardsDistributed(_dayId, distributedAmount, rolloverForNextWeek);
     }
 
     /**
      * @dev Internal: Add reward amount to player's escrow
      * @param _player Player address
-     * @param _weekId Week earned
+     * @param _dayId Day earned
      * @param _amount Reward amount
      */
-    function _addToEscrow(address _player, uint256 _weekId, uint256 _amount) internal {
-        unclaimedRewards[_player].push(UnclaimedReward({
-            weekId: _weekId,
-            amount: _amount,
-            claimed: false
-        }));
+    function _addToEscrow(
+        address _player,
+        uint256 _dayId,
+        uint256 _amount
+    ) internal {
+        unclaimedRewards[_player].push(
+            UnclaimedReward({dayId: _dayId, amount: _amount, claimed: false})
+        );
         totalUnclaimedAmount[_player] += _amount;
-        emit RewardEscrowed(_player, _weekId, _amount);
+        emit RewardEscrowed(_player, _dayId, _amount);
     }
 
     /**
-     * @dev Claim unclaimed rewards - can claim multiple weeks at once
+     * @dev Claim unclaimed rewards - can claim multiple days at once
      * @param _indices Array of indices of unclaimed rewards to claim (optional filter, if empty claims all)
      */
     function claimRewards(uint256[] calldata _indices) external nonReentrant {
@@ -708,7 +760,7 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
                 uint256 idx = _indices[i];
                 if (idx >= rewards.length) revert InvalidRewardIndex();
                 if (rewards[idx].claimed) revert RewardAlreadyClaimed();
-                
+
                 totalClaim += rewards[idx].amount;
                 rewards[idx].claimed = true;
                 claimedCount++;
@@ -716,7 +768,8 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
         }
 
         if (totalClaim == 0) revert InvalidClaimAmount();
-        if (cUSD.balanceOf(address(this)) < totalClaim) revert InsufficientContractBalance();
+        if (cUSD.balanceOf(address(this)) < totalClaim)
+            revert InsufficientContractBalance();
 
         totalUnclaimedAmount[msg.sender] -= totalClaim;
         cUSD.safeTransfer(msg.sender, totalClaim);
@@ -725,12 +778,12 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
     }
 
     /**
-     * @dev Get rollover amount for next week
-     * @param _weekId Current week
+     * @dev Get rollover amount for next day
+     * @param _dayId Current day
      */
-    function getRolloverAmount(uint256 _weekId) external view returns (uint256) {
-        if (_isWeekDistributed[_weekId]) {
-            return weeklyRewardPools[_weekId].rolloverAmount;
+    function getRolloverAmount(uint256 _dayId) external view returns (uint256) {
+        if (_isDayDistributed[_dayId]) {
+            return dailyRewardPools[_dayId].rolloverAmount;
         }
         return 0;
     }
@@ -740,7 +793,9 @@ contract Play3310V1 is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reent
      * @dev Authorize upgrade to new implementation
      * @param _newImplementation Address of new implementation
      */
-    function _authorizeUpgrade(address _newImplementation) internal override onlyOwner {
+    function _authorizeUpgrade(
+        address _newImplementation
+    ) internal override onlyOwner {
         emit ContractUpgraded(_newImplementation);
     }
 }
