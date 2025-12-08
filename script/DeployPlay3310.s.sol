@@ -13,36 +13,14 @@ import "../src/Play3310Proxy.sol";
 contract DeployPlay3310 is Script {
     // ==================== HELPER FUNCTIONS ====================
     /**
-     * @dev Calculate the most recent Monday 00:00 UTC
-     * @return Monday's timestamp at 00:00 UTC
+     * @dev Calculate the start of the current day 00:00 UTC
+     * @return Day's timestamp at 00:00 UTC
      */
-    function getMondayTimestamp(uint256 _now) internal pure returns (uint256) {
-        // Days since Unix epoch (Jan 1, 1970 was Thursday)
-        // 0 = Thursday, 1 = Friday, 2 = Saturday, 3 = Sunday, 4 = Monday
-        uint256 daysSinceEpoch = _now / 86400;
-
-        // Calculate current day of week (0 = Thursday)
-        uint256 dayOfWeek = (daysSinceEpoch + 4) % 7;
-
-        // Days to subtract to reach last Monday
-        uint256 daysToMonday;
-        if (dayOfWeek == 4) {
-            // Today is Monday
-            daysToMonday = 0;
-        } else if (dayOfWeek < 4) {
-            // Monday hasn't happened yet this week
-            daysToMonday = dayOfWeek + 3;  // Go back to last Monday
-        } else {
-            // Monday already passed this week
-            daysToMonday = dayOfWeek - 4;
-        }
-
-        // Get timestamp of the Monday and adjust to 00:00 UTC
-        uint256 mondayTimestamp = _now - (daysToMonday * 86400);
+    function getDayStartTimestamp(
+        uint256 _now
+    ) internal pure returns (uint256) {
         // Remove time-of-day to get 00:00 UTC
-        mondayTimestamp = (mondayTimestamp / 86400) * 86400;
-
-        return mondayTimestamp;
+        return (_now / 86400) * 86400;
     }
 
     function run() public {
@@ -54,22 +32,28 @@ contract DeployPlay3310 is Script {
         require(backendSigner != address(0), "BACKEND_SIGNER_ADDRESS not set");
         require(cUSD != address(0), "CUSD_ADDRESS not set");
 
-        // Calculate genesis timestamp (most recent Monday 00:00 UTC)
-        uint256 genesisTimestamp = getMondayTimestamp(block.timestamp);
+        // Calculate genesis timestamp (start of current day 00:00 UTC)
+        uint256 genesisTimestamp = getDayStartTimestamp(block.timestamp);
 
         // ==================== DEPLOYMENT ====================
         console.log("\n=== Starting Play3310 Deployment ===");
         console.log("Backend Signer: %s", backendSigner);
         console.log("cUSD Address: %s", cUSD);
         console.log("Owner Address: %s", msg.sender);
-        console.log("Genesis Timestamp (Monday 00:00 UTC): %d", genesisTimestamp);
+        console.log(
+            "Genesis Timestamp (Day Start 00:00 UTC): %d",
+            genesisTimestamp
+        );
 
         // Start broadcasting transactions
         vm.startBroadcast();
 
         // Deploy implementation
         Play3310V1 implementation = new Play3310V1();
-        console.log("\n Implementation deployed at: %s", address(implementation));
+        console.log(
+            "\n Implementation deployed at: %s",
+            address(implementation)
+        );
 
         // Deploy proxy with initialization
         Play3310Proxy proxy = new Play3310Proxy(
@@ -90,16 +74,20 @@ contract DeployPlay3310 is Script {
         Play3310V1 game = Play3310V1(address(proxy));
 
         // Check initialization
-        uint256 weeklyPool = game.weeklyBasePool();
+        uint256 dailyPool = game.dailyBasePool();
         uint256 minScore = game.minQualificationScore();
         address signerCheck = game.backendSigner();
-        uint256 currentWeek = game.getCurrentWeek();
+        uint256 currentDay = game.getCurrentDay();
 
         console.log("\nContract State:");
-        console.log("  Weekly Base Pool: %d wei (%.2f cUSD)", weeklyPool, uint256(weeklyPool) / 1e18);
+        console.log(
+            "  Daily Base Pool: %d wei (%.2f cUSD)",
+            dailyPool,
+            uint256(dailyPool) / 1e18
+        );
         console.log("  Min Qualification Score: %d", minScore);
         console.log("  Backend Signer: %s", signerCheck);
-        console.log("  Current Week: %d", currentWeek);
+        console.log("  Current Day: %d", currentDay);
 
         // Verify signer matches
         require(signerCheck == backendSigner, "Signer mismatch!");
